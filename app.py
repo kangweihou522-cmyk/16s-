@@ -266,7 +266,8 @@ def preprocess(job,c,quality_only=False):
     job['step']='检查输入及运行依赖'
     samples=discover(c); out=path(c['output'])
     raw=path(c['input'])
-    if out==raw or raw in out.parents or out in raw.parents: raise ValueError('输出根目录须与原始数据目录分开，不能互相包含')
+    if out==raw or out in raw.parents: raise ValueError('输出根目录可放在原始目录的子目录中，但不能是原始目录本身或其父目录')
+    if out.exists() and not out.is_dir(): raise ValueError('输出位置必须是目录，不能是已有文件')
     integer(c,'threads',1,max(1,os.cpu_count() or 1))
     if not quality_only:
         integer(c,'min_frequency',1,1000000)
