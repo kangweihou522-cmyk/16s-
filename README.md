@@ -27,12 +27,14 @@ Windows 双击入口 `启动工作站.bat` 针对你已安装的 `Ubuntu-24.04`�
 - 界面和文件检查：Python 3 标准库，无需 Node.js、Shiny 或第三方 Python 包。
 - 分析：WSL 内已有 QIIME 2 amplicon conda 环境，含 dada2、cutadapt、feature-classifier、phylogeny、diversity、taxa、feature-table 等插件。
 - 分类器：在网页选择你自己的兼容 `.qza`。程序不下载、不替换分类器。`tools peek` 可以查看类型，但完整 sklearn/区域兼容性需实际分类时核验。
-- 绘图：WSL 中的 R，以及 ggplot2、patchwork、svglite、xml2、jsonlite、systemfonts、multcompView。Windows R/RStudio 的包库不等同于 Linux R 包库。
+- 绘图：独立 conda 环境 `16s-workstation-r`，固定 R 4.4 并一次安装 ggplot2、patchwork、svglite、xml2、jsonlite、systemfonts、multcompView、MASS 的兼容二进制包。与QIIME环境分开，也不调用Windows R/RStudio。网页中的“绘图专用R环境名”默认为该环境。
 - 选择你已安装的 QIIME 环境名。`conda env list` 可查看；环境检查会报告名称、插件、R依赖和分类器情况。没有选择环境也能返回发现结果。不同 QIIME 版本可能改变命令或文件布局，不能仅凭名称认定兼容。
 
-如果缺R依赖，在项目目录执行 `bash 安装依赖.sh`。需要网络和 apt 权限；脚本不会安装或替换 QIIME 环境。R包安装在 `~/R/16S-workstation-library`，启动脚本自动加载该库。使用 HTTPS 安装，保留 TLS 校验。
+如果缺R依赖，在项目目录执行 `bash 安装依赖.sh`。需要网络和 apt 权限；apt只准备Python/字体，脚本不再更新系统R，不修改QIIME环境。它从单一 conda-forge 渠道创建或修复 `16s-workstation-r`，保留TLS及包校验。后台通过 `conda run` 调用专用R，并在激活前后隔离系统/用户旧R包路径和启动配置。原先失败安装的 `~/R/16S-workstation-library` 保留，工作站不再加载。首次创建可能下载数百MB，具体随依赖变化。
 
-绘图默认 Times New Roman；依赖脚本尝试复用已有 Windows 字体。没有该字体时，请明确选择已安装的 DejaVu Serif；会改变字体，不静默替换。
+绘图默认 Times New Roman；依赖脚本尝试复用已有Windows字体，并把系统DejaVu字体复制到工作站本地字体目录。没有Times时，请明确选择DejaVu Serif，不静默替换。
+
+若早期安装日志出现 `SETLENGTH` / `SET_FRAME`、旧 `cpp11` 编译错误或旧 `gtable` 版本错误，先 `git pull --ff-only`，再重跑新版 `安装依赖.sh`。这是系统R与旧编译包的混用问题，不应删除原始数据或修改全局R配置来绕过。专用环境安装失败时不会退回混用系统R。
 
 ## 数据命名与分组
 

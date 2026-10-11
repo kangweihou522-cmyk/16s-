@@ -106,11 +106,27 @@ def conda_cmd(c):
     if not env: raise ValueError('请填写已安装的 QIIME 2 conda 环境名')
     return [executable,'run','--no-capture-output','-n',env]
 
-def command(job,args,cwd=None):
+def r_command(c,*args):
+    renv=c.get('r_env') or os.environ.get('WORKSTATION_R_ENV','16s-workstation-r')
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*',renv): raise ValueError('R环境名只能包含字母、数字、点、下划线和短横线')
+    r_options=['--version'] if args==('--version',) else ['--vanilla',*map(str,args)]
+    return [find_conda(c),'run','--no-capture-output','-n',renv,'/usr/bin/env','-u','R_HOME','-u','LD_LIBRARY_PATH','-u','LD_PRELOAD',
+        'R_LIBS=/dev/null','R_LIBS_USER=/dev/null','R_LIBS_SITE=/dev/null','R_PROFILE=/dev/null','R_PROFILE_USER=/dev/null','R_ENVIRON=/dev/null','R_ENVIRON_USER=/dev/null',
+        'Rscript',*r_options]
+
+def r_execution_env(c=None):
+    process_env=os.environ.copy()
+    for key in ['R_HOME','LD_LIBRARY_PATH','LD_PRELOAD','DYLD_LIBRARY_PATH','PKG_CONFIG_PATH','LIBRARY_PATH','CPATH','C_INCLUDE_PATH','CPLUS_INCLUDE_PATH','FONTCONFIG_PATH','FONTCONFIG_FILE']:
+        process_env.pop(key,None)
+    for key in ['R_LIBS','R_LIBS_USER','R_LIBS_SITE']: process_env[key]='/dev/null'
+    for key in ['R_PROFILE','R_PROFILE_USER','R_ENVIRON','R_ENVIRON_USER']: process_env[key]='/dev/null'
+    return process_env
+
+def command(job,args,cwd=None,process_env=None):
     if job.get('cancel'): raise RuntimeError('用户已停止任务')
     with open(job['log'],'a',encoding='utf8') as f:
         f.write('\n$ '+ __import__('shlex').join(map(str,args))+'\n'); f.flush()
-        proc=subprocess.Popen(list(map(str,args)),cwd=cwd,stdout=f,stderr=subprocess.STDOUT,start_new_session=True)
+        proc=subprocess.Popen(list(map(str,args)),cwd=cwd,stdout=f,stderr=subprocess.STDOUT,start_new_session=True,env=process_env)
         job['pid']=proc.pid
         code=proc.wait(); job.pop('pid',None)
     with Path(job['log']).with_name('commands.jsonl').open('a',encoding='utf8') as f:
@@ -177,9 +193,9 @@ def preflight(job,c):
             result['checks'].append({'component':'plugin '+plugin,'ok':proc.returncode==0,'details':'' if proc.returncode==0 else (proc.stdout+proc.stderr)[-2000:]})
         except Exception as e:result['checks'].append({'component':'plugin '+plugin,'ok':False,'details':str(e)})
     try:
-        proc=subprocess.run(['Rscript',str(ROOT/'check_r.R'),c.get('font','Times New Roman')],text=True,capture_output=True,timeout=90)
-        result['checks'].append({'component':'R 与绘图依赖','ok':proc.returncode==0,'details':(proc.stdout+proc.stderr)[-6000:]})
-    except Exception as e:result['checks'].append({'component':'R 与绘图依赖','ok':False,'details':str(e)})
+        proc=subprocess.run(r_command(c,str(ROOT/'check_r.R'),c.get('font','Times New Roman')),text=True,capture_output=True,timeout=90,env=r_execution_env(c))
+        result['checks'].append({'component':'专用 R 环境与绘图依赖','ok':proc.returncode==0,'details':(proc.stdout+proc.stderr)[-6000:]})
+    except Exception as e:result['checks'].append({'component':'专用 R 环境与绘图依赖','ok':False,'details':str(e)})
     if c.get('classifier','').strip():
         try:
             classifier=path(c['classifier'])
@@ -254,9 +270,9 @@ def preprocess(job,c,quality_only=False):
         w.writerow(['sample-id','forward-absolute-filepath','reverse-absolute-filepath'] if c['mode']=='paired' else ['sample-id','absolute-filepath'])
         for x in samples: w.writerow([x['SampleID'],x['files']['1']]+([x['files']['2']] if c['mode']=='paired' else []))
     q(job,c,'info')
-    if not quality_only: command(job,['Rscript','--version'],run)
+    if not quality_only: command(job,r_command(c,'--version'),run,process_env=r_execution_env(c))
     if not quality_only:
-        command(job,['Rscript',str(ROOT/'check_r.R'),c['font']],run)
+        command(job,r_command(c,str(ROOT/'check_r.R'),c['font']),run,process_env=r_execution_env(c))
         q(job,c,'tools','peek',classifier)
     job['step']='导入 FASTQ 与质量概览'
     paired=c['mode']=='paired'
@@ -398,7 +414,7 @@ def diversity(job,c):
     inventory(sub)
     (sub/'qiime_statistics_complete.json').write_text(json.dumps({'completed_at':time.time()}))
     job['step']='R 绘图：读取保存的 QIIME 2 指标、PCoA 与分类表'
-    command(job,['Rscript',str(ROOT/'render.R'),str(sub),saved['font'],str(run),saved.get('plot_scripts','')],sub)
+    command(job,r_command(saved,str(ROOT/'render.R'),str(sub),saved['font'],str(run),saved.get('plot_scripts','')),sub,process_env=r_execution_env(saved))
     inventory(sub)
     (sub/'complete.json').write_text(json.dumps({'completed_at':time.time(),'note':'保存本次随机抽平表；重跑可能不同。'}),encoding='utf8')
     job['step']='分析完成：SVG、统计表、QZA/QZV 与抽平特征表已保存'

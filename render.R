@@ -6,7 +6,7 @@ font <- if (length(args)>1) args[2] else 'DejaVu Serif'
 parent <- if (length(args)>2) normalizePath(args[3], mustWork=TRUE) else dirname(run)
 script <- sub('^--file=','',grep('^--file=',commandArgs(),value=TRUE)[1])
 assets <- if (length(args)>3 && nzchar(args[4])) args[4] else file.path(dirname(normalizePath(script)),'plots')
-needed <- c('ggplot2','svglite','systemfonts','patchwork','xml2','jsonlite')
+needed <- c('ggplot2','svglite','systemfonts','patchwork','xml2','jsonlite','MASS')
 missing <- needed[!vapply(needed,requireNamespace,logical(1),quietly=TRUE)]
 if (length(missing)) stop('Missing R packages: ',paste(missing,collapse=', '))
 if (!font %in% c('serif','sans','mono') && !font %in% systemfonts::system_fonts()$family)

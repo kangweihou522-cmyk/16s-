@@ -55,9 +55,10 @@ class BackendTests(unittest.TestCase):
         return self.config() | dict(output=str(self.root / "results"), threads="1",
             min_frequency="1", max_depth="100", trunc_f="250", trunc_r="230",
             trim_f="0", trim_r="0", amplicon="460", primer_mode="338F",
-            classifier=str(classifier), font="DejaVu Sans", env="fake-qiime", conda="/fake/conda")
+            classifier=str(classifier), font="DejaVu Sans", env="fake-qiime",
+            r_env="custom-r-plotting", conda="/fake/conda")
 
-    def mock_biom_conversion(self, job, args, cwd=None):
+    def mock_biom_conversion(self, job, args, cwd=None, process_env=None):
         """Materialize only synthetic TSV counts needed by downstream checks."""
         if "biom" not in args or "convert" not in args:
             return
@@ -246,10 +247,11 @@ class BackendTests(unittest.TestCase):
         self.pair("0001")
         original = {p: p.read_bytes() for p in self.raw.iterdir()}
         config = self.processing_config()
-        qiime_args, command_args = [], []
+        qiime_args, command_args, command_envs = [], [], []
         job = {}
-        def fake_command(job, args, cwd=None):
+        def fake_command(job, args, cwd=None, process_env=None):
             command_args.append(args)
+            command_envs.append(process_env)
             self.mock_biom_conversion(job, args, cwd)
         with patch.object(app, "q", side_effect=lambda job, c, *args: qiime_args.append(args)), \
              patch.object(app, "command", side_effect=fake_command):
@@ -263,6 +265,17 @@ class BackendTests(unittest.TestCase):
         self.assertIn("PairedEndFastqManifestPhred33V2", import_args)
         self.assertTrue(any(a[:2] == ("cutadapt", "trim-paired") for a in qiime_args))
         self.assertTrue(any(a[:2] == ("dada2", "denoise-paired") for a in qiime_args))
+        r_calls = [(a, e) for a, e in zip(command_args, command_envs) if "Rscript" in a]
+        self.assertEqual(len(r_calls), 2)
+        for args, process_env in r_calls:
+            self.assertEqual(args[args.index("-n") + 1], "custom-r-plotting")
+            if args[-1] == "--version":
+                self.assertNotIn("--vanilla", args)
+            else:
+                self.assertIn("--vanilla", args)
+            self.assertEqual(process_env["R_LIBS_USER"], os.devnull)
+        biom = next(a for a in command_args if "biom" in a)
+        self.assertEqual(biom[biom.index("-n") + 1], "fake-qiime")
         self.assertTrue((run / "preprocess_complete.json").exists())
         self.assertTrue((run / "input_inventory.json").exists())
         self.assertEqual({p: p.read_bytes() for p in self.raw.iterdir()}, original)
@@ -370,7 +383,7 @@ class BackendTests(unittest.TestCase):
         (parent / "preprocess_complete.json").write_text("{}", encoding="utf8")
         for name in ("rooted-tree.qza", "filtered-table.qza"):
             (parent / name).write_bytes(b"placeholder-for-command-tests")
-        qiime_calls, commands, events, job = [], [], [], {}
+        qiime_calls, commands, command_envs, events, job = [], [], [], [], {}
 
         def fake_q(job, config, *args):
             qiime_calls.append(tuple(args))
@@ -404,8 +417,9 @@ class BackendTests(unittest.TestCase):
                         "\t0001\t0002\t0003\t0004\n0001\t0\t1\t2\t3\n"
                         "0002\t1\t0\t3\t2\n0003\t2\t3\t0\t1\n0004\t3\t2\t1\t0\n", encoding="utf8")
 
-        def fake_command(job, args, cwd=None):
+        def fake_command(job, args, cwd=None, process_env=None):
             commands.append(args)
+            command_envs.append(process_env)
             events.append(("command", tuple(args)))
 
         with patch.object(app, "q", side_effect=fake_q), \
@@ -419,11 +433,17 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(len(beta), 8)
         self.assertEqual({a[a.index("--p-method") + 1] for a in beta}, {"permanova", "permdisp"})
         self.assertTrue(all("--p-pairwise" in a for a in beta))
-        self.assertTrue(any(str(a[0]).endswith("Rscript") for a in commands))
+        self.assertTrue(any("Rscript" in a for a in commands))
+        render_args, render_env = next((a, e) for a, e in zip(commands, command_envs) if "Rscript" in a)
+        self.assertEqual(render_args[render_args.index("-n") + 1], "custom-r-plotting")
+        self.assertEqual(render_env["R_LIBS_USER"], os.devnull)
+        self.assertIn("--vanilla", render_args)
+        biom = next(a for a in commands if "biom" in a)
+        self.assertEqual(biom[biom.index("-n") + 1], "fake-qiime")
         self.assertTrue((Path(job["run"]) / "complete.json").exists())
         self.assertTrue((Path(job["run"]) / "qiime_outputs_complete.json").exists())
         render_index = next(i for i, (kind, args) in enumerate(events)
-                            if kind == "command" and str(args[0]).endswith("Rscript"))
+                            if kind == "command" and "Rscript" in args)
         export_events = [i for i, (kind, args) in enumerate(events)
                          if kind == "qiime" and args[:2] == ("tools", "export")]
         self.assertTrue(export_events)
@@ -442,10 +462,10 @@ class BackendTests(unittest.TestCase):
         first_sub = Path(job["run"])
         first_parameters = (first_sub / "parameters.json").read_bytes()
 
-        def failed_render(job, args, cwd=None):
-            if str(args[0]).endswith("Rscript"):
+        def failed_render(job, args, cwd=None, process_env=None):
+            if "Rscript" in args:
                 raise RuntimeError("intentional mocked R rendering failure")
-            fake_command(job, args, cwd)
+            fake_command(job, args, cwd, process_env)
 
         with patch.object(app, "q", side_effect=fake_q), \
              patch.object(app, "command", side_effect=failed_render):
@@ -466,8 +486,8 @@ class BackendTests(unittest.TestCase):
         def fake_run(args, **kwargs):
             if args[:3] == ["/mock/conda", "env", "list"]:
                 return app.subprocess.CompletedProcess(args, 0, '{"envs":["/mock/envs/qiime-installed"]}', "")
-            if args[0] == "Rscript":
-                raise FileNotFoundError("Rscript is not installed")
+            if "Rscript" in args:
+                return app.subprocess.CompletedProcess(args, 1, "", "EnvironmentNameNotFound: 16s-workstation-r")
             self.fail(f"Unexpected process with no environment selected: {args}")
 
         with patch.object(app, "find_conda", return_value="/mock/conda"), \
@@ -478,7 +498,7 @@ class BackendTests(unittest.TestCase):
         checks = {x["component"]: x for x in result["checks"]}
         self.assertTrue(checks["conda"]["ok"])
         self.assertFalse(checks["QIIME 2"]["ok"])
-        self.assertFalse(checks["R 与绘图依赖"]["ok"])
+        self.assertFalse(checks["专用 R 环境与绘图依赖"]["ok"])
         self.assertFalse(checks["用户选择的分类器"]["ok"])
 
     def test_preflight_stops_before_start_and_between_checks(self):
