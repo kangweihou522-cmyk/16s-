@@ -38,7 +38,27 @@ Windows 双击入口 `启动工作站.bat` 针对你已安装的 `Ubuntu-24.04`�
 
 ## 数据命名与分组
 
-目前支持 Phred33 编码的 `.fastq`、`.fq` 和相应 gzip 压缩格式，单端或未拼接双端。CSV 是严格两列 `SampleID,Group`，样本名按文本读取，前导零保留。
+目前支持 Phred33 编码的 `.fastq`、`.fq` 和相应 gzip 压缩格式，单端或未拼接双端。推荐四列 CSV `SampleID,Group,forward,reverse`：`SampleID` 是本次分析的样本名，`Group` 是分组，`forward` 和 `reverse` 分别指定该样本的 R1 和 R2 文件。样本名直接按 CSV 中的文本读取，无需与文件名相同，前导零保留。
+
+例如，选择的原始目录中有 `raw.A1.1.fq.gz` 和 `raw.A1.2.fq.gz`，可以填写：
+
+```csv
+SampleID,Group,forward,reverse
+A1,CON,raw.A1.1.fq.gz,raw.A1.2.fq.gz
+A2,CON,raw.A2.1.fq.gz,raw.A2.2.fq.gz
+CAP1,LDC,CAP1.raw_1.fastq,CAP1.raw_2.fastq
+CAP2,LDC,CAP2.raw_1.fastq,CAP2.raw_2.fastq
+```
+
+以上是格式示例，不代表实际测序数据。仓库中的 `分组模板.csv` 可用作四列模板，替换为你的样本、分组与真实文件名。`forward` / `reverse` 可填写文件名、相对于所选原始目录的子目录路径（如 `batch1/001_R1.fastq.gz`），或该目录内的 Windows / WSL 绝对路径。路径含逗号时，按标准 CSV 格式用双引号包围单元格。
+
+双端必须填写两端；单端选择“真正的单端 FASTQ”后，保留四列表头，仅填写 `forward`，`reverse` 留空。方向以列为准，不依赖文件名末尾的 R1/R2 标记。每行对应一个样本，每个方向对应一个文件，多 lane 不会自动合并。
+
+四列模式只分析 CSV 中列出的文件，目录中未列出的 FASTQ 不纳入本次分析。程序检查重复样本 ID、空分组、文件缺失、同一文件被重复使用（包括不同路径别名），以及文件是否位于所选原始目录内；目录外的路径会被拒绝。点击“检查配对与引物”可核对每个样本的分组、方向和实际文件名。程序将按此映射生成 QIIME 2 manifest，以及只含样本和分组的 QIIME metadata，后续分析和绘图使用相同的样本关系。
+
+Excel 编辑时将 `SampleID` 列设为文本，并另存为 CSV UTF-8；如果 Excel 已去掉前导零，工作站无法恢复。CSV 路径按原始文件目录解析，而不是按 CSV 所在目录解析。
+
+旧版两列 `SampleID,Group` 仍兼容：程序根据分组表中的样本名自动匹配以下常见文件命名。
 
 | 双端文件示例 | CSV SampleID |
 |---|---|
@@ -47,9 +67,9 @@ Windows 双击入口 `启动工作站.bat` 针对你已安装的 `Ubuntu-24.04`�
 | `001_R1.fastq.gz` / `001_R2.fastq.gz` | `001` |
 | `001_S7_L001_R1_001.fastq.gz` / 同样格式的 R2 | `001` |
 
-使用分组表中的样本名验证匹配；识别 raw 标记和末尾方向号。真实样本名中的数字保留。如果同名可对应多个CSV样本，则报告歧义；重复方向、缺少另一端、多lane不静默合并。单端也支持 `raw.A1.fq.gz` 或 `A1.raw.fastq` 对应 `A1`。
+两列模式使用分组表中的样本名验证匹配；识别 raw 标记和末尾方向号。真实样本名中的数字保留。如果同名可对应多个CSV样本，则报告歧义；重复方向、缺少另一端、多lane不静默合并。单端也支持 `raw.A1.fq.gz` 或 `A1.raw.fastq` 对应 `A1`。对于不符合命名规则的文件，使用四列映射直接指定即可。
 
-分组示例：
+旧版两列示例（已保留在 `分组模板_两列.csv`）：
 
 ```csv
 SampleID,Group

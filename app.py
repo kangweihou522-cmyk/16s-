@@ -24,19 +24,42 @@ def integer(c, key, low, high):
     if not low <= v <= high: raise ValueError(f'{key} 必须在 {low}–{high} 之间')
     return v
 
-def metadata(p):
-    with p.open(encoding='utf-8-sig', newline='') as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames != ['SampleID','Group']: raise ValueError('分组 CSV 列必须按顺序为 SampleID,Group')
-        rows = []
-        for r in reader:
-            if None in r or r.get('SampleID') is None or r.get('Group') is None: raise ValueError('CSV 每行必须恰好两列')
-            sid, group = r['SampleID'], r['Group']
-            if not sid or not group or any(x in sid+group for x in '\t\r\n'): raise ValueError('样本名和分组不能为空或含制表符/换行')
-            if sid != sid.strip() or group != group.strip(): raise ValueError('样本名/分组两端有空格，请清理 CSV')
-            rows.append((sid,group))
-    if not rows or len({r[0] for r in rows}) != len(rows): raise ValueError('CSV 为空或 SampleID 重复')
+def read_sample_sheet(p):
+    with p.open(encoding='utf-8-sig',newline='') as f:
+        reader=csv.DictReader(f)
+        header=reader.fieldnames or []
+        allowed=[{'SampleID','Group'},{'SampleID','Group','forward','reverse'}]
+        if len(header)!=len(set(header)) or set(header) not in allowed:
+            raise ValueError('分组 CSV 列应为 SampleID,Group 或 SampleID,Group,forward,reverse；列名不能重复')
+        rows=[]
+        for line,r in enumerate(reader,start=2):
+            if None in r or any(r.get(k) is None for k in header):
+                width='两列' if len(header)==2 else '四列'
+                raise ValueError(f'CSV 第{line}行必须恰好{width}')
+            sid,group=r['SampleID'],r['Group']
+            if not sid or not group or any(x in sid+group for x in '\t\r\n'):
+                raise ValueError(f'第{line}行样本名和分组不能为空或含制表符/换行')
+            if sid!=sid.strip() or group!=group.strip(): raise ValueError('样本名/分组两端有空格，请清理 CSV')
+            if len(header)==4:
+                if not r['forward']: raise ValueError(f'{sid} 的 forward 不能为空')
+                if any(x in r['forward']+r['reverse'] for x in '\t\r\n'): raise ValueError('测序文件路径不能包含制表符/换行')
+                if r['forward']!=r['forward'].strip() or r['reverse']!=r['reverse'].strip(): raise ValueError('测序文件路径两端有空格，请清理 CSV')
+            rows.append(r)
+    if not rows or len({r['SampleID'] for r in rows})!=len(rows): raise ValueError('CSV 为空或 SampleID 重复')
     return rows
+
+def metadata(p):
+    return [(r['SampleID'],r['Group']) for r in read_sample_sheet(p)]
+
+def mapped_fastq(folder,value,sid,direction):
+    if re.match(r'^[A-Za-z]:[\\/]',value) or value.startswith('/'):
+        candidate=path(value)
+    else:
+        candidate=(folder/value.replace('\\','/')).resolve()
+    if not candidate.is_relative_to(folder): raise ValueError(f'{sid} 的 {direction} 文件必须位于选择的原始目录内')
+    if not re.search(r'\.(fastq|fq)(\.gz)?$',candidate.name,re.I): raise ValueError(f'{sid} 的 {direction} 不是支持的 FASTQ 文件')
+    if not candidate.is_file(): raise ValueError(f'{sid} 的 {direction} 文件不存在或不是文件：{value}')
+    return candidate
 
 def reads(p, limit=1000):
     op = gzip.open if p.name.lower().endswith('.gz') else open
@@ -54,31 +77,48 @@ def match_primer(seq, primer):
     return any(sum(seq[k+i] not in IUPAC[b] for i,b in enumerate(primer)) <= 1 for k in range(min(9,max(0,len(seq)-n+1))))
 
 def discover(c):
-    folder = path(c['input']); rows = metadata(path(c['metadata']))
+    folder=path(c['input']); sheet=read_sample_sheet(path(c['metadata']))
+    rows=[(r['SampleID'],r['Group']) for r in sheet]
     if not folder.is_dir(): raise ValueError('输入目录不存在')
-    mode = c['mode']
+    mode=c['mode']
     if mode not in ('paired','single'): raise ValueError('未知数据格式')
-    found = {}
-    for p in sorted(folder.iterdir()):
-        if not re.search(r'\.(fastq|fq)(\.gz)?$',p.name,re.I) or not p.is_file(): continue
-        stem = re.sub(r'\.(fastq|fq)(\.gz)?$','',p.name,flags=re.I)
-        if mode=='paired':
-            candidates=[]
-            for known,_ in rows:
-                m0=re.fullmatch(r'(?:raw[._-])?'+re.escape(known)+r'(?:[._-]raw)?(?:_S\d+)?(?:_L\d{3})?[_\.-]R?([12])(?:_\d{3})?',stem,re.I)
-                if m0: candidates.append((known,m0.group(1)))
-            if len(candidates)>1: raise ValueError(f'文件名对应多个 SampleID: {p.name}')
-            m = re.fullmatch(r'(.+?)(?:_S\d+)?(?:_L\d{3})?[_\.-]R?([12])(?:_\d{3})?',stem,re.I)
-            if not m: raise ValueError(f'不能识别配对文件 {p.name}；请使用 SampleID_R1/R2.fastq.gz 命名')
-            sid, direction = candidates[0] if candidates else (m.group(1),m.group(2))
-        else:
-            candidates=[known for known,_ in rows if re.fullmatch(r'(?:raw[._-])?'+re.escape(known)+r'(?:[._-]raw)?',stem,re.I)]
-            if len(candidates)>1: raise ValueError(f'文件名对应多个 SampleID: {p.name}')
-            sid,direction=(candidates[0] if candidates else stem),'1'
-        if direction in found.setdefault(sid,{}): raise ValueError(f'{sid} 有多个同方向文件；多 lane 请先经确认合并')
-        found[sid][direction]=p
-    expected = {r[0] for r in rows}
-    if set(found)!=expected: raise ValueError(f'样本不匹配：缺文件 {sorted(expected-set(found))}；缺分组 {sorted(set(found)-expected)}')
+    explicit='forward' in sheet[0]
+    found={}
+    if explicit:
+        used={}
+        for row in sheet:
+            sid=row['SampleID']
+            if mode=='paired' and not row['reverse']: raise ValueError(f'{sid} 的 reverse 不能为空，双端需要两份文件')
+            if mode=='single' and row['reverse']: raise ValueError(f'{sid} 的 reverse 应留空，当前选择的是单端')
+            files={}
+            for direction,column in [('1','forward')]+([('2','reverse')] if mode=='paired' else []):
+                file=mapped_fastq(folder,row[column],sid,column)
+                st=file.stat(); identity=(st.st_dev,st.st_ino) if st.st_ino else str(file)
+                if identity in used: raise ValueError(f'文件重复引用：{sid}.{column} 与 {used[identity]} 使用同一 FASTQ')
+                used[identity]=f'{sid}.{column}'
+                files[direction]=file
+            found[sid]=files
+    else:
+        for p in sorted(folder.iterdir()):
+            if not re.search(r'\.(fastq|fq)(\.gz)?$',p.name,re.I) or not p.is_file(): continue
+            stem = re.sub(r'\.(fastq|fq)(\.gz)?$','',p.name,flags=re.I)
+            if mode=='paired':
+                candidates=[]
+                for known,_ in rows:
+                    m0=re.fullmatch(r'(?:raw[._-])?'+re.escape(known)+r'(?:[._-]raw)?(?:_S\d+)?(?:_L\d{3})?[_\.-]R?([12])(?:_\d{3})?',stem,re.I)
+                    if m0: candidates.append((known,m0.group(1)))
+                if len(candidates)>1: raise ValueError(f'文件名对应多个 SampleID: {p.name}')
+                m = re.fullmatch(r'(.+?)(?:_S\d+)?(?:_L\d{3})?[_\.-]R?([12])(?:_\d{3})?',stem,re.I)
+                if not m: raise ValueError(f'不能识别配对文件 {p.name}；请使用 SampleID_R1/R2.fastq.gz 命名')
+                sid, direction = candidates[0] if candidates else (m.group(1),m.group(2))
+            else:
+                candidates=[known for known,_ in rows if re.fullmatch(r'(?:raw[._-])?'+re.escape(known)+r'(?:[._-]raw)?',stem,re.I)]
+                if len(candidates)>1: raise ValueError(f'文件名对应多个 SampleID: {p.name}')
+                sid,direction=(candidates[0] if candidates else stem),'1'
+            if direction in found.setdefault(sid,{}): raise ValueError(f'{sid} 有多个同方向文件；多 lane 请先经确认合并')
+            found[sid][direction]=p
+        expected = {r[0] for r in rows}
+        if set(found)!=expected: raise ValueError(f'样本不匹配：缺文件 {sorted(expected-set(found))}；缺分组 {sorted(set(found)-expected)}')
     result=[]
     for sid,group in rows:
         files = found[sid]
@@ -90,7 +130,7 @@ def discover(c):
         for k,rr in seqs.items():
             evidence['R'+k]={'sampled_reads':len(rr),'min_length':min(len(s) for _,s in rr),'max_length':max(len(s) for _,s in rr),
                 'primer_match_fraction':{name:round(sum(match_primer(s,pr) for _,s in rr)/len(rr),4) for name,pr in PRIMERS.items()}}
-        result.append({'SampleID':sid,'Group':group,'files':{k:str(v) for k,v in files.items()},'evidence':evidence})
+        result.append({'SampleID':sid,'Group':group,'files':{k:str(v) for k,v in files.items()},'evidence':evidence,'mapping':'explicit' if explicit else 'automatic'})
     return result
 
 def find_conda(c):
@@ -254,6 +294,7 @@ def preprocess(job,c,quality_only=False):
             if stat.st_size!=x['size'] or stat.st_mtime_ns!=x['mtime_ns']: raise ValueError('原始文件已改变，请重新质量检查')
         oldmeta=[(x['SampleID'],x['Group']) for x in old['samples']]
         if oldmeta!=[(x['SampleID'],x['Group']) for x in samples]: raise ValueError('分组已改变，请重新质量检查')
+        if [(x['SampleID'],x['files']) for x in old['samples']]!=[(x['SampleID'],x['files']) for x in samples]: raise ValueError('样本与测序文件的映射已改变，请重新质量检查')
         (run/'preprocess_started.json').write_text('{}')
     else:
         out.mkdir(parents=True,exist_ok=True)

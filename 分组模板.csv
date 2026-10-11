@@ -1,7 +1,5 @@
-﻿SampleID,Group
-001,CON
-002,CON
-003,LDC
-004,LDC
-005,HDC
-006,HDC
+﻿SampleID,Group,forward,reverse
+A1,CON,raw.A1.1.fq.gz,raw.A1.2.fq.gz
+A2,CON,raw.A2.1.fq.gz,raw.A2.2.fq.gz
+CAP1,LDC,CAP1.raw_1.fastq,CAP1.raw_2.fastq
+CAP2,LDC,CAP2.raw_1.fastq,CAP2.raw_2.fastq
