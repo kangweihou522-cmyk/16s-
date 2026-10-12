@@ -1,6 +1,6 @@
 # Render saved QIIME outputs only: no rarefaction, ordination, or tests rerun in R.
 args <- commandArgs(trailingOnly=TRUE)
-if (!length(args)) stop('Usage: Rscript render.R RUN_DIR FONT [PREPROCESS_DIR] [PLOTS_DIR]')
+if (!length(args)) stop('Usage: Rscript render.R RUN_DIR FONT [PREPROCESS_DIR] [PLOTS_DIR] [GROUP_STYLE_JSON] [OUTPUT_DIR]')
 run <- normalizePath(args[1], mustWork=TRUE)
 font <- if (length(args)>1) args[2] else 'DejaVu Serif'
 parent <- if (length(args)>2) normalizePath(args[3], mustWork=TRUE) else dirname(run)
@@ -23,7 +23,9 @@ result_path <- function(base,...) {
   }
   file.path(base,logical)
 }
-out <- result_path(run,'R_original_style'); dir.create(out,recursive=TRUE,showWarnings=FALSE)
+out <- if (length(args)>5 && nzchar(args[6])) args[6] else result_path(run,'R_original_style')
+dir.create(out,recursive=TRUE,showWarnings=FALSE)
+out <- normalizePath(out,mustWork=TRUE)
 notes <- character()
 note <- function(x) { notes <<- c(notes,x); message(x) }
 csv <- function(d,f) {
@@ -40,9 +42,23 @@ tab <- function(f,metadata=FALSE) {
 }
 md <- tab(result_path(run,'metadata.tsv'),TRUE); names(md)[1] <- 'SampleID'
 if (!'Group' %in% names(md) || anyNA(md[c('SampleID','Group')]) || anyDuplicated(md$SampleID) || any(!nzchar(md$SampleID)) || any(!nzchar(md$Group))) stop('Invalid SampleID/Group metadata.')
-groups <- unique(md$Group); colors <- c(CON='#D55E00',LDC='#0072B2',HDC='#CC79A7')
-extra <- setdiff(groups,names(colors))
-if (length(extra)) colors <- c(colors,setNames(grDevices::hcl.colors(length(extra),'Dark 3'),extra))
+style_file <- if (length(args)>4 && nzchar(args[5])) args[5] else file.path(run,'group_style.json')
+if (length(args)>4 && nzchar(args[5]) && !file.exists(style_file)) stop('Group style JSON is missing: ',style_file)
+requested_style <- if (file.exists(style_file)) jsonlite::read_json(style_file,simplifyVector=FALSE) else NULL
+resolve_group_style <- function(actual,requested=NULL) {
+  order <- if (is.null(requested$group_order)) character() else unlist(requested$group_order,use.names=FALSE)
+  if (!is.character(order) || anyNA(order) || any(!nzchar(order)) || anyDuplicated(order)) stop('Invalid group display order.')
+  order <- c(intersect(order,actual),setdiff(actual,order))
+  palette <- c(CON='#D55E00',LDC='#0072B2',HDC='#CC79A7')
+  extra <- setdiff(actual,names(palette))
+  if (length(extra)) palette <- c(palette,setNames(grDevices::hcl.colors(length(extra),'Dark 3'),extra))
+  custom <- if (is.null(requested$group_colors)) character() else unlist(requested$group_colors,use.names=TRUE)
+  if (length(custom) && (is.null(names(custom)) || anyDuplicated(names(custom)) || anyNA(custom) || any(!grepl('^#[[:xdigit:]]{6}$',custom)))) stop('Invalid group display colors; use #RRGGBB.')
+  palette[intersect(names(custom),actual)] <- custom[intersect(names(custom),actual)]
+  list(group_order=order,group_colors=palette[order])
+}
+style <- resolve_group_style(unique(md$Group),requested_style)
+groups <- style$group_order; colors <- style$group_colors
 original <- all(file.exists(file.path(assets,c('qiime2_io.R','plot_alpha_original_style.R','plot_beta_original_style.R'))))
 if (original) for (f in c('qiime2_io.R','plot_alpha_original_style.R','plot_beta_original_style.R')) source(file.path(assets,f),encoding='UTF-8')
 if (!original) note('Original assets unavailable; embedded plots omit significance annotations.')
@@ -179,6 +195,8 @@ if (file.exists(tf) && file.exists(tx)) {
   if (any(!valid)) note(paste('Zero-read samples omitted from composition:',paste(colnames(counts)[!valid],collapse=', ')))
   if (!any(valid)) stop('No nonzero samples for taxonomy composition.')
   counts <- counts[,valid,drop=FALSE]; pmd <- pmd[valid,,drop=FALSE]
+  composition_style <- resolve_group_style(unique(pmd$Group),requested_style)
+  pmd$Group <- factor(pmd$Group,levels=composition_style$group_order)
   lineage <- tax$Taxon[match(tbl[[1]],tax$FeatureID)]; split_tax <- strsplit(ifelse(is.na(lineage),'',lineage),';',fixed=TRUE)
   for (rank_name in c('phylum','genus')) {
     rank <- if (rank_name=='phylum') 2 else 6
@@ -195,20 +213,29 @@ if (file.exists(tf) && file.exists(tx)) {
     kept <- head(names(sort(rowMeans(rel),decreasing=TRUE)),15); plot_rel <- rel[kept,,drop=FALSE]
     rest <- setdiff(rownames(rel),kept); if (length(rest)) plot_rel <- rbind(plot_rel,Other=colSums(rel[rest,,drop=FALSE]))
     long <- data.frame(Taxon=rep(rownames(plot_rel),times=ncol(plot_rel)),SampleID=rep(colnames(plot_rel),each=nrow(plot_rel)),Abundance=as.vector(plot_rel),Group=rep(pmd$Group,each=nrow(plot_rel)))
-    long$SampleID <- factor(long$SampleID,levels=colnames(plot_rel)); means <- stats::aggregate(Abundance~Taxon+Group,long,mean)
+    sample_order <- pmd$SampleID[order(pmd$Group,seq_len(nrow(pmd)))]
+    long$SampleID <- factor(long$SampleID,levels=sample_order); means <- stats::aggregate(Abundance~Taxon+Group,long,mean)
     csv(means,file.path(out,'taxonomy',paste0(rank_name,'_group_mean_top15_plot_input.csv')))
     for (kind in c('sample','group_mean')) {
-      dat <- if (kind=='sample') long else means; dat$Label <- if (kind=='sample') dat$SampleID else factor(dat$Group,levels=unique(pmd$Group))
-      p <- ggplot2::ggplot(dat,ggplot2::aes(Label,Abundance,fill=Taxon))+ggplot2::geom_col(width=.85)+theme_base()+
+      dat <- if (kind=='sample') long else means; dat$Label <- if (kind=='sample') dat$SampleID else factor(dat$Group,levels=composition_style$group_order)
+      markers <- unique(dat[c('Label','Group')])
+      markers$Group <- factor(markers$Group,levels=composition_style$group_order)
+      p <- ggplot2::ggplot(dat,ggplot2::aes(Label,Abundance,fill=Taxon))+ggplot2::geom_col(width=.85)+
+        ggplot2::geom_point(data=markers,ggplot2::aes(x=Label,y=-.035,color=Group),inherit.aes=FALSE,shape=15,size=3)+
+        ggplot2::scale_color_manual(values=composition_style$group_colors,breaks=composition_style$group_order)+
+        ggplot2::scale_y_continuous(breaks=seq(0,1,.2))+theme_base()+
         ggplot2::theme(axis.text.x=ggplot2::element_text(angle=45,hjust=1))+ggplot2::labs(title=paste(rank_name,'composition (unrarefied filtered table)'),
-          subtitle=if (kind=='sample') 'Top 15 taxa + Other; each sample normalized to 1' else 'Mean of per-sample relative abundances; top 15 + Other',x='',y='Relative abundance')
+          subtitle=if (kind=='sample') 'Top 15 taxa + Other; each sample normalized to 1' else 'Mean of per-sample relative abundances; top 15 + Other',x='',y='Relative abundance',color='Group',fill='Taxon')
       save_plot(p,paste0('taxonomy/',rank_name,'_',kind,'_unrarefied'),max(8,min(20,nlevels(dat$Label)*.5+4)),6)
     }
   }
 } else note('Taxonomy exports unavailable; composition plots omitted.')
 writeLines(unique(notes),file.path(out,'render_notes.txt'),useBytes=TRUE)
 writeLines(capture.output(sessionInfo()),file.path(out,'R_sessionInfo.txt'))
-jsonlite::write_json(list(original_assets=original,font=font,source='saved_QIIME2_outputs',notes=unique(notes)),file.path(out,'render_summary.json'),auto_unbox=TRUE,pretty=TRUE)
+jsonlite::write_json(list(original_assets=original,font=font,source='saved_QIIME2_outputs',input_run=run,
+                         group_style=list(group_order=as.list(style$group_order),group_colors=as.list(style$group_colors)),
+                         notes=unique(notes)),file.path(out,'render_summary.json'),auto_unbox=TRUE,pretty=TRUE)
 files <- list.files(out,recursive=TRUE,full.names=TRUE)
-utils::write.table(data.frame(path=substring(files,nchar(run)+2),bytes=file.info(files)$size),file.path(out,'results.tsv'),sep='\t',row.names=FALSE,quote=FALSE)
+index_root <- if (length(args)>5 && nzchar(args[6])) out else run
+utils::write.table(data.frame(path=substring(files,nchar(index_root)+2),bytes=file.info(files)$size),file.path(out,'results.tsv'),sep='\t',row.names=FALSE,quote=FALSE)
 message('R figures completed: ',out)

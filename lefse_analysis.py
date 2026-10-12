@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from execution_record import capture_source
+from group_style import resolve_group_style
 from run_layout import artifact_path
 
 RANKS = ('k', 'p', 'c', 'o', 'f', 'g', 's')
@@ -302,10 +303,89 @@ for kind,title in [('bar','LEfSe LDA scores'),('cladogram','LEfSe taxonomy clado
     plt.close(figure)
 """
 
+OFFICIAL_PLOT_SCRIPT = """# Presentation adapter for the installed official LEfSe plotter, not a model fit.
+# Only group-order expressions and colors/legend labels change. Taxonomy layout,
+# saved LDA scores, and the official plotting functions remain in use.
+import ast,hashlib,importlib.util,json,sys
+from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+
+kind,style_file=sys.argv[1:3]
+style=json.loads(Path(style_file).read_text(encoding='utf8'))
+original_order=style['group_order']; groups=style['groups']
+safe_order=[groups[name] for name in original_order]
+positions={name:i for i,name in enumerate(safe_order)}
+original_names={safe:original for original,safe in groups.items()}
+palette=[style['group_colors'][name] for name in original_order]
+name='lefse.lefse_plot_res' if kind=='bar' else 'lefse.lefse_plot_cladogram'
+spec=importlib.util.find_spec(name)
+if spec is None or not spec.origin: raise ValueError('Official LEfSe plot module is unavailable: '+name)
+source_path=Path(spec.origin); source=source_path.read_bytes()
+
+def group_order(values):
+    values=list(values)
+    if any(value not in positions for value in values):
+        raise ValueError('Official LEfSe plot contains an unknown group')
+    return sorted(values,key=positions.__getitem__)
+
+# Change explicit class sorts only; leave taxonomic node/feature sorting intact.
+targets={ast.dump(ast.parse(expr,mode='eval').body) for expr in
+         ("params['all_feats'].split(':')", "data['cls']", "tree['classes']")}
+class GroupSortAdapter(ast.NodeTransformer):
+    count=0
+    def visit_Call(self,node):
+        self.generic_visit(node)
+        if (isinstance(node.func,ast.Name) and node.func.id=='sorted' and
+            len(node.args)==1 and not node.keywords and ast.dump(node.args[0]) in targets):
+            node.func=ast.copy_location(ast.Name(id='_workstation_group_order',ctx=ast.Load()),node.func)
+            self.count+=1
+        return node
+adapter=GroupSortAdapter(); tree=adapter.visit(ast.parse(source,filename=str(source_path)))
+if adapter.count<2: raise ValueError('This official LEfSe plot version cannot apply the requested group order safely')
+namespace={'__name__':'workstation_official_lefse_plot','__file__':str(source_path)}
+exec(compile(ast.fix_missing_locations(tree),str(source_path),'exec'),namespace)
+namespace['_workstation_group_order']=group_order
+namespace['colors']=palette
+if kind=='cladogram': namespace['dark_colors']=palette
+
+original_legend=Axes.legend
+def ordered_legend(axis,*args,**kwargs):
+    if len(args)>=2: handles,labels=args[:2]; extra=args[2:]
+    elif not args: handles,labels=axis.get_legend_handles_labels(); extra=()
+    else: return original_legend(axis,*args,**kwargs)
+    if labels and all(label in original_names for label in labels):
+        pairs=sorted(zip(handles,labels),key=lambda pair:positions[pair[1]])
+        handles=[pair[0] for pair in pairs]
+        labels=[original_names[pair[1]] for pair in pairs]
+        return original_legend(axis,handles,labels,*extra,**kwargs)
+    return original_legend(axis,*args,**kwargs)
+Axes.legend=ordered_legend
+
+# Horizontal bar groups follow the chosen order from top to bottom.
+original_savefig=plt.savefig
+def ordered_savefig(*args,**kwargs):
+    if kind=='bar':
+        for axis in plt.gcf().axes: axis.invert_yaxis()
+    return original_savefig(*args,**kwargs)
+plt.savefig=ordered_savefig
+matplotlib.rcParams['svg.fonttype']='none'
+sys.argv=[name,*sys.argv[3:]]
+namespace['plot_res' if kind=='bar' else 'plot_cladogram']()
+Path(sys.argv[2]+'.style.json').write_text(json.dumps({
+    'official_module':name,'official_source':str(source_path),
+    'official_source_sha256':hashlib.sha256(source).hexdigest(),
+    'presentation_group_sort_adaptations':adapter.count,
+    'group_order':original_order,'group_colors':style['group_colors'],
+    'statistics_refit':False},ensure_ascii=False,indent=2)+'\\n',encoding='utf8')
+"""
+
 
 def _script(filename, source, job):
     Path(filename).write_text(source, encoding='utf8')
-    capture_source(job, filename, 'Python', '本次实际执行的 LEfSe 输入整理或无命中提示绘图脚本。')
+    capture_source(job, filename, 'Python', '本次实际执行的 LEfSe 输入整理、官方绘图配色与顺序适配或无命中提示脚本。')
     return str(filename)
 
 
@@ -388,6 +468,8 @@ def run_lefse(job, config, saved, parent, api):
     if config.get('conda'):
         runtime_config['conda'] = config['conda']
     samples = _samples(saved.get('samples', []))
+    style = resolve_group_style(config, samples, fallback=saved)
+    _json(run / 'group_style.json', style)
     api.begin_stage(job, '01_inputs', 'LEfSe：未抽平计数、分组与分类输入', settings)
     counts, totals = read_counts(artifact_path(parent, 'exported-table/feature-table.tsv'), samples)
     taxonomy = read_taxonomy(artifact_path(parent, 'exported-taxonomy/taxonomy.tsv'), counts)
@@ -434,7 +516,7 @@ def run_lefse(job, config, saved, parent, api):
     status = {'statistics': 'executed' if pruning['tested_features'] else 'skipped_no_variable_known_taxa',
               **pruning, 'positive_lda_features': sum(row['lda_score'] is not None for row in results),
               'result_file': FIT_RESULT, 'result_sha256': hashlib.sha256(result_file.read_bytes()).hexdigest(),
-              'settings': settings, 'groups': data['groups'], 'preprocess': str(parent)}
+              'settings': settings, 'groups': data['groups'], 'group_style': style, 'preprocess': str(parent)}
     _json(run / 'lefse_complete.json', status)
     api.finish_stage(job, status, ['L2–L7 分类层级联合分析；格式器自动补出的 L1 / 未知中间节点与常数分类不参加检验。',
                                   '原始标准 LEfSe 多组策略为 one-against-all (0)，all-against-all (1) 更严格。',
@@ -461,10 +543,16 @@ def render_lefse(job, config, analysis, api):
     filtered, selected = filter_results(results, threshold)
     saved_file = analysis / 'parameters.json'
     saved = json.loads(saved_file.read_text(encoding='utf8')) if saved_file.is_file() else {}
+    style_file = analysis / 'group_style.json'
+    fallback = (json.loads(style_file.read_text(encoding='utf8')) if style_file.is_file()
+                else status.get('group_style') or saved.get('config', {}))
+    style = resolve_group_style(config, [{'Group': group} for group in status['groups']], fallback=fallback)
+    _json(output / 'group_style.json', style)
     runtime_config = {**saved.get('config', {}), **status['settings']}
     if config.get('conda'):
         runtime_config['conda'] = config['conda']
-    api.begin_stage(job, '03_figures', 'LEfSe：从保存分数筛选并绘图', {'lda_threshold': threshold, 'statistics_refit': False})
+    api.begin_stage(job, '03_figures', 'LEfSe：从保存分数筛选并绘图',
+                    {'lda_threshold': threshold, 'statistics_refit': False, **style})
     folder = output / '03_figures'
     folder.mkdir(exist_ok=True)
     plot_result = folder / 'threshold_results.res'
@@ -475,11 +563,14 @@ def render_lefse(job, config, analysis, api):
     prefix = _prefix(runtime_config, api)
     figures = {kind + '_' + ext: str(folder / (kind + '.' + ext)) for kind in ('bar', 'cladogram') for ext in ('png', 'svg')}
     if selected:
-        class_order = ':'.join(sorted(status['groups'].values()))
+        class_order = ':'.join(status['groups'][group] for group in style['group_order'])
+        _json(folder / 'plot_style.json', {**style, 'groups': status['groups']})
+        script = _script(folder / 'render_official.py', OFFICIAL_PLOT_SCRIPT, job)
         for kind in ('bar', 'cladogram'):
             for ext in ('png', 'svg'):
                 title = ('LEfSe LDA scores' if kind == 'bar' else 'LEfSe taxonomy cladogram') + ' (LDA > ' + str(threshold) + ')'
-                args = prefix + [runtime['paths'][kind], str(plot_result), figures[kind + '_' + ext],
+                args = prefix + ['python', script, kind, str(folder / 'plot_style.json'),
+                                 str(plot_result), figures[kind + '_' + ext],
                                  '--format', ext, '--dpi', '160', '--title', title, '--all_feats', class_order]
                 if kind == 'bar':
                     # Two final lineage segments distinguish duplicate genera/species.
@@ -495,11 +586,12 @@ def render_lefse(job, config, analysis, api):
     summary = {'lefse_run': str(analysis), 'render_run': str(output), 'lda_threshold': threshold,
                'biomarker_count': len(selected), 'statistics_refit': False, 'figures': figures,
                'result_sha256': status['result_sha256'], 'no_hits': not selected,
-               'statistics_status': status['statistics']}
+               'statistics_status': status['statistics'], **style}
     _json(folder / 'render_summary.json', summary)
     api.finish_stage(job, summary, ['柱图与分类层级 cladogram 来自同一份原始 LDA 缓存与当前筛选阈值。',
                                    'cladogram 表示分类注释层级，不是序列系统发育树。',
                                    '阈值调整只改变显示，不重新计算 P 值或优化显著性；没有命中时生成明确提示图。',
+                                   '分组配色与图例顺序使用当前统一设置；LDA 柱图按指定分组从上到下排列。改变配色或顺序仅重绘，保留原始统计结果。',
                                    '名称与原始 Group / 分类的对应关系见原分析 01_inputs/*_mapping.tsv。'])
     job['result'] = summary
     return summary

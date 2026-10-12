@@ -39,6 +39,7 @@ def prepare_execution(job, root, action, config, runtime):
         ('run_layout.py', '结果路径、计数汇总和每一步处理说明。'),
         ('quality_advice.py', '读取逐位置质量统计，生成 DADA2 参数建议。'),
         ('depth_advice.py', '依据过滤后样本计数推荐抽平深度，另附曲线诊断。'),
+        ('group_style.py', '统一的分组名称、显示顺序和十六进制配色；不改变统计设计。'),
         ('abundance_tables.py', 'ASV 与 L2–L7 计数、相对丰度和分类注释导出。'),
         ('differential_analysis.py', '门到属的 ANCOM-BC2 / QIIME ANCOM 差异分析编排。'),
         ('lefse_analysis.py', 'LEfSe 分类谱系预处理、检验和基于缓存的 LDA 阈值重绘。'),
@@ -154,7 +155,7 @@ def finalize_execution(job):
     if not record['commands']:
         lines.append('\n# 本任务未通过命令执行器运行外部命令；Python 处理及检查结果见阶段报告。')
     for logical in ['manifest.tsv', 'metadata.tsv', 'layout.json', 'differential_options.json',
-                    'lefse_parameters.json', '00_inputs/effective_parameters.json',
+                    'lefse_parameters.json', 'group_style.json', '00_inputs/effective_parameters.json',
                     '03_figures/render_summary.json', '10_abundance/manifest.json']:
         # Use the saved layout, preserving both organized and older flat runs.
         from run_layout import artifact_path
@@ -181,9 +182,10 @@ def finalize_execution(job):
                 if filename.is_file():
                     lines.extend(['# 旧版原始记录：' + str(filename), filename.read_text(encoding='utf8')])
         dependencies=effective.get('extension_parameters',{})
-        for key,label in [('abundance_run','复用的丰度导出'),('lefse_run','用于重绘的 LEfSe 原始检验')]:
+        for key,label in [('abundance_run','复用的丰度导出'),('lefse_run','用于重绘的 LEfSe 原始检验'),('diversity_run','用于重绘的多样性原始指标及检验')]:
             if key=='abundance_run' and record['action']!='differential': continue
             if key=='lefse_run' and record['action']!='lefse-render': continue
+            if key=='diversity_run' and record['action']!='diversity-render': continue
             value=dependencies.get(key)
             if not value: continue
             dependency=Path(value)

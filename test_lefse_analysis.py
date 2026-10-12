@@ -3,11 +3,13 @@ import csv
 import hashlib
 import importlib.util
 import json
+import os
 import pickle
 import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -69,6 +71,8 @@ class SimulatedCLI:
                 for kind in ('bar', 'cladogram'):
                     for ext in ('png', 'svg'):
                         (Path(tail[1]) / (kind + '.' + ext)).write_text('SIMULATED no hits image')
+            elif Path(tail[0]).name == 'render_official.py':
+                Path(tail[4]).write_text('SIMULATED official plot presentation adapter output')
         elif executable == 'lefse_run.py':
             with Path(tail[0]).open('rb') as stream:
                 data = pickle.load(stream)
@@ -278,7 +282,7 @@ class LefseCacheTests(unittest.TestCase):
         self.assertTrue(all('f__' in key for key in self.api.fitted_features))
         self.assertEqual(result['lefse_run'], str(self.run))
         self.assertEqual(set(result['figures']), {'bar_png', 'bar_svg', 'cladogram_png', 'cladogram_svg'})
-        self.assertEqual(len([args for args in commands if Path(args[5]).name.startswith('lefse_plot_')]), 4)
+        self.assertEqual(len([args for args in commands if Path(args[6]).name == 'render_official.py']), 4)
         self.assertTrue((self.run / 'lefse_complete.json').is_file())
 
     def test_replot_changes_threshold_without_model_or_formatter_and_preserves_fit(self):
@@ -311,6 +315,33 @@ class LefseCacheTests(unittest.TestCase):
         self.assertEqual(len(later), 1)
         self.assertEqual(Path(later[0][6]).name, 'render_empty.py')
         self.assertTrue(all(Path(path).stat().st_size for path in result['figures'].values()))
+
+    def test_style_only_replot_uses_original_names_and_preserves_saved_statistics(self):
+        self.fit()
+        cached = (self.run / lefse.FIT_RESULT).read_bytes()
+        marker = (self.run / 'lefse_complete.json').read_bytes()
+        output = self.run / 'renders' / 'style_only'
+        output.mkdir(parents=True)
+        start = len(self.api.commands)
+        style = {'group_order': ['B', 'A'], 'group_colors': {'A': '#112233', 'B': '#AABBCC'}}
+        result = lefse.render_lefse({'run': str(output)}, {'lda_threshold': 2, **style}, self.run, self.api)
+        self.assertEqual(result['group_order'], ['B', 'A'])
+        self.assertEqual(result['group_colors'], style['group_colors'])
+        self.assertEqual((self.run / lefse.FIT_RESULT).read_bytes(), cached)
+        self.assertEqual((self.run / 'lefse_complete.json').read_bytes(), marker)
+        later = self.api.commands[start:]
+        self.assertEqual(len(later), 4)
+        self.assertTrue(all(Path(args[6]).name == 'render_official.py' for args in later))
+        self.assertTrue(all(args[args.index('--all_feats') + 1] == 'B:A' for args in later))
+        plot_style = json.loads((output / '03_figures/plot_style.json').read_text())
+        self.assertEqual(plot_style['groups'], {'A': 'A', 'B': 'B'})
+        self.assertEqual(plot_style['group_colors'], style['group_colors'])
+        inherited = self.run / 'renders' / 'inherited_style'
+        inherited.mkdir(parents=True)
+        original_style = json.loads((self.run / 'group_style.json').read_text())
+        preview = lefse.render_lefse({'run': str(inherited)}, {'lda_threshold': 2}, self.run, self.api)
+        self.assertEqual(preview['group_order'], original_style['group_order'])
+        self.assertEqual(preview['group_colors'], original_style['group_colors'])
 
     def test_changed_cache_rejected_without_recomputation(self):
         self.fit()
@@ -354,6 +385,63 @@ class LefseCacheTests(unittest.TestCase):
         self.assertEqual(rows[1][2:4], ['', ''])
         self.assertEqual(rows[2][2:4], ['G_B', '-3'])
         self.assertEqual(results[0]['raw'][2:4], ['G_A', '2'])
+
+
+@unittest.skipUnless(os.environ.get('LEFSE_OFFICIAL_PLOT_ROOT'),
+                     'Set LEFSE_OFFICIAL_PLOT_ROOT to the previously downloaded official LEfSe source')
+class OfficialPlotStyleTests(unittest.TestCase):
+    def test_official_renderers_follow_named_colors_original_labels_and_order(self):
+        """Run real official plotting functions, with no statistical fit or R calls."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / 'render_official.py'
+            script.write_text(lefse.OFFICIAL_PLOT_SCRIPT)
+            order = ['Z/group', 'A group', 'B group']
+            colors = {'Z/group': '#AA1122', 'A group': '#228844', 'B group': '#1144BB'}
+            style = {'group_order': order, 'group_colors': colors,
+                     'groups': {'Z/group': 'Z_group', 'A group': 'A_group', 'B group': 'B_group'}}
+            (root / 'style.json').write_text(json.dumps(style))
+            # Explicit rendering fixture, not scores claimed to come from a LEfSe fit.
+            fixture = root / 'fixture.res'
+            fixture.write_text('k__Bacteria.p__P1.c__C1.o__O1.f__F1.g__G1\t5\tZ_group\t3.1\t.01\n'
+                               'k__Bacteria.p__P2.c__C2.o__O2.f__F2.g__G2\t4\tA_group\t4\t.02\n'
+                               'k__Bacteria.p__P3.c__C3.o__O3.f__F3.g__G3\t3\tB_group\t2.5\t.03\n')
+            original = fixture.read_bytes()
+            # The official plot modules import lefse.lefse, whose unused rpy2 import
+            # otherwise requires installing an R bridge. No R routine is provided.
+            runner = """import os,sys,types,runpy
+sys.path.insert(0,os.environ['LEFSE_OFFICIAL_PLOT_ROOT'])
+rpy2=types.ModuleType('rpy2'); rpy2.__path__=[]
+robjects=types.ModuleType('rpy2.robjects')
+sys.modules['rpy2']=rpy2; sys.modules['rpy2.robjects']=robjects
+sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name='__main__')
+"""
+            for kind in ('bar', 'cladogram'):
+                for ext in ('png', 'svg'):
+                    output = root / (kind + '.' + ext)
+                    args = [sys.executable, '-c', runner, str(script), kind, str(root / 'style.json'),
+                            str(fixture), str(output), '--format', ext, '--all_feats', 'Z_group:A_group:B_group']
+                    if kind == 'bar':
+                        args += ['--subclades', '2', '--max_feature_len', '10000']
+                    env = {**os.environ, 'MPLCONFIGDIR': str(root / 'matplotlib')}
+                    proc = subprocess.run(args, capture_output=True, text=True, env=env, timeout=30)
+                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                    self.assertGreater(output.stat().st_size, 0)
+                    audit = json.loads(Path(str(output) + '.style.json').read_text())
+                    self.assertEqual(audit['group_order'], order)
+                    self.assertFalse(audit['statistics_refit'])
+                svg = root / (kind + '.svg')
+                tree = ET.parse(svg)
+                texts = [(''.join(node.itertext()).strip(), node.attrib) for node in tree.iter()
+                         if node.tag.endswith('}text')]
+                self.assertEqual([label for label, _ in texts if label in order], order)
+                for color in colors.values():
+                    self.assertIn(color.lower(), svg.read_text().lower())
+                if kind == 'bar':
+                    features = {label: float(attrs['y']) for label, attrs in texts if label.startswith('f__')}
+                    self.assertLess(features['f__F1.g__G1'], features['f__F2.g__G2'])
+                    self.assertLess(features['f__F2.g__G2'], features['f__F3.g__G3'])
+            self.assertEqual(fixture.read_bytes(), original)
 
 
 if __name__ == '__main__':

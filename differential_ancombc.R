@@ -54,8 +54,26 @@ fit_ancom_model <- function(counts, meta, opts, fit_function = ANCOMBC::ancombc2
     mdfdr_control = opts$mdfdr_control)
 }
 
-plot_effects <- function(res, directory, reference, font) {
+effect_group_style <- function(actual, requested = NULL) {
+  order <- if (is.null(requested$group_order)) character() else unlist(requested$group_order, use.names = FALSE)
+  if (!is.character(order) || anyNA(order) || any(!nzchar(order)) || anyDuplicated(order))
+    stop('Invalid group display order')
+  order <- c(intersect(order, actual), setdiff(actual, order))
+  colors <- c(CON = '#D55E00', LDC = '#0072B2', HDC = '#CC79A7')
+  extra <- setdiff(actual, names(colors))
+  if (length(extra)) colors <- c(colors, setNames(grDevices::hcl.colors(length(extra), 'Dark 3'), extra))
+  custom <- if (is.null(requested$group_colors)) character() else unlist(requested$group_colors, use.names = TRUE)
+  if (length(custom) && (is.null(names(custom)) || anyDuplicated(names(custom)) || anyNA(custom) ||
+                        any(!grepl('^#[[:xdigit:]]{6}$', custom)))) stop('Invalid group display colors; use #RRGGBB')
+  colors[intersect(names(custom), actual)] <- custom[intersect(names(custom), actual)]
+  list(group_order = order, group_colors = colors[order])
+}
+
+plot_effects <- function(res, directory, reference, font, group_style = NULL) {
   fields <- if (is.null(res) || !'taxon' %in% names(res)) character() else grep('^lfc_Group', names(res), value = TRUE)
+  targets <- sub('^lfc_Group', '', fields)
+  style <- effect_group_style(unique(c(reference, targets)), group_style)
+  fields <- fields[order(match(targets, style$group_order))]
   plots <- character()
   for (i in seq_along(fields)) {
     term <- sub('^lfc_', '', fields[i])
@@ -65,14 +83,22 @@ plot_effects <- function(res, directory, reference, font) {
     dat <- dat[is.finite(dat$lfc) & is.finite(dat$se) & is.finite(dat$q), , drop = FALSE]
     if (!nrow(dat)) next
     dat <- head(dat[order(dat$q, -abs(dat$lfc)), , drop = FALSE], 25L)
-    # Plot adjusted q-values as supplied by ANCOM-BC2, without inferring convergence.
+    target <- sub('^Group', '', term)
+    # Only figure order/color changes. The fit, reference, effects and q-values remain intact.
+    dat$direction_group <- ifelse(dat$lfc > 0, target, ifelse(dat$lfc < 0, reference, NA_character_))
+    present <- style$group_order
+    dat$direction_group <- factor(dat$direction_group, levels = present)
     dat$taxon <- factor(dat$taxon, levels = rev(dat$taxon))
-    fig <- ggplot2::ggplot(dat, ggplot2::aes(x = lfc, y = taxon, color = q)) +
+    write_result(dat, file.path(directory, paste0('effect_', i, '_plot_input.tsv')))
+    fig <- ggplot2::ggplot(dat, ggplot2::aes(x = lfc, y = taxon, color = direction_group)) +
       ggplot2::geom_vline(xintercept = 0, color = 'grey70') +
       ggplot2::geom_segment(ggplot2::aes(x = lfc - se, xend = lfc + se, yend = taxon)) +
-      ggplot2::geom_point(size = 2) + ggplot2::scale_color_viridis_c(direction = -1) +
-      ggplot2::labs(x = 'ANCOM-BC2 log fold change (± SE)', y = NULL, color = 'BH q',
-                    title = paste(sub('^Group', '', term), 'versus', reference)) +
+      ggplot2::geom_point(size = 2) +
+      ggplot2::scale_color_manual(values = style$group_colors, breaks = present, na.value = '#777777') +
+      ggplot2::labs(x = 'ANCOM-BC2 log fold change (± SE)', y = NULL, color = 'Effect direction',
+                    title = paste(target, 'versus', reference),
+                    caption = paste0('Positive: ', target, ' − ', reference,
+                                     '; negative: reference is higher; zero effect is gray. Adjusted q-values remain in the exported tables.')) +
       ggplot2::theme_bw(base_family = font) + ggplot2::theme(axis.text.y = ggplot2::element_text(size = 8))
     for (ext in c('png', 'svg')) {
       name <- file.path(directory, paste0('effect_', i, '.', ext))
@@ -171,7 +197,8 @@ main <- function() {
     status$note <- ifelse(status$in_model_results, 'See official model result including NA',
                           'Not in model results; inspect prevalence, structural zero table and warnings')
     write_result(status, file.path(folder, 'taxon_status.tsv'))
-    plots <- plot_effects(fit$res, folder, opts$reference_group, if (is.null(opts$font)) 'sans' else opts$font)
+    plots <- plot_effects(fit$res, folder, opts$reference_group, if (is.null(opts$font)) 'sans' else opts$font,
+                          opts$group_style)
     diagnostics <- list(level = entry$level, method = 'ANCOM-BC2', status = 'executed', started_at = started,
                          finished_at = format(Sys.time(), tz = 'UTC', usetz = TRUE), warnings = unique(warnings),
                          convergence = 'Not inferred; use actual package warnings, saved fit and workflow.log',

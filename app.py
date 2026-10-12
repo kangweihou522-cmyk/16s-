@@ -9,6 +9,7 @@ from run_layout import initialize_layout, artifact_path, mapped_argument, qualit
 from quality_advice import recommend_parameters
 from depth_advice import read_curves, recommend_depth
 from execution_record import prepare_execution, capture_r_sources, command_explanation, finalize_execution, now
+from group_style import resolve_group_style, save_group_style
 
 ROOT = Path(__file__).resolve().parent
 
@@ -438,7 +439,8 @@ def preprocess(job,c,quality_only=False):
         if not quality_only: (run/'preprocess_started.json').write_text('{}')
     marker(run)
     job['run']=str(run); job['log']=str(run/'workflow.log')
-    saved=dict(c); saved['samples']=samples
+    saved=dict(c, **resolve_group_style(c,samples)); saved['samples']=samples
+    save_group_style(run,resolve_group_style(saved,samples))
     (run/'parameters.json').write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf8')
     (run/'input_inventory.json').write_text(json.dumps([{'path':v,'size':Path(v).stat().st_size,'mtime_ns':Path(v).stat().st_mtime_ns} for x in samples for v in x['files'].values()],indent=2),encoding='utf8')
     write_metadata(run,[(x['SampleID'],x['Group']) for x in samples])
@@ -578,6 +580,7 @@ def diversity(job,c):
     run=path(c['run'])
     if not (run/'preprocess_complete.json').is_file(): raise ValueError('请选择本工作站已完成预处理的 run 目录')
     saved=json.loads((run/'parameters.json').read_text(encoding='utf8'))
+    saved=dict(saved,**resolve_group_style(c,saved['samples'],fallback=saved))
     depth=integer(c,'depth',1,100000000); perms=integer(c,'permutations',99,99999)
     kept=retention(run,depth); rows=[(x['SampleID'],x['Group']) for x in kept if x['retained']]
     groups={g for _,g in rows}; orig={x['Group'] for x in kept}
@@ -588,6 +591,7 @@ def diversity(job,c):
     initialize_layout(sub,'diversity')
     marker(sub)
     job['run']=str(sub); job['log']=str(sub/'workflow.log'); job['step']='单次抽平与核心多样性'
+    style_file=save_group_style(sub,resolve_group_style(saved,saved['samples']))
     write_metadata(sub,rows); artifact_path(sub,'retention.json').write_text(json.dumps(kept,ensure_ascii=False,indent=2),encoding='utf8')
     (sub/'parameters.json').write_text(json.dumps({'depth':depth,'permutations':perms,'preprocess':str(run),'config':saved},ensure_ascii=False,indent=2),encoding='utf8')
     # QIIME's random rarefaction may differ between runs. Preserve this table; do not re-rarefy for plots.
@@ -635,7 +639,7 @@ def diversity(job,c):
     (sub/'qiime_statistics_complete.json').write_text(json.dumps({'completed_at':time.time()}))
     finish_stage(job,{'executed':sum(x['status']=='executed' for x in stats),'skipped':sum(x['status']=='skipped' for x in stats),'tests':stats},['检验采用 QIIME 2 保存的结果；常数指标或全零距离会注明原因并跳过，不生成虚构 P 值。'])
     begin_stage(job,'04_R_figures','R 绘图：读取保存的 QIIME 2 结果',{'font':saved['font'],'r_env':saved.get('r_env','16s-workstation-r')})
-    command(job,r_command(saved,str(ROOT/'render.R'),str(sub),saved['font'],str(run),saved.get('plot_scripts','')),sub,process_env=r_execution_env(saved))
+    command(job,r_command(saved,str(ROOT/'render.R'),str(sub),saved['font'],str(run),saved.get('plot_scripts',''),str(style_file)),sub,process_env=r_execution_env(saved))
     figure_root=artifact_path(sub,'R_original_style')
     summary_file=figure_root/'render_summary.json'
     if not summary_file.is_file(): raise ValueError('R 命令结束但没有生成绘图摘要，请查看运行日志')
@@ -644,6 +648,46 @@ def diversity(job,c):
     inventory(sub)
     (sub/'complete.json').write_text(json.dumps({'completed_at':time.time(),'note':'保存本次随机抽平表；重跑可能不同。'}),encoding='utf8')
     job['step']='分析完成：SVG、统计表、QZA/QZV 与抽平特征表已保存'
+    job['result']={'diversity_run':str(sub),'group_style':resolve_group_style(saved,saved['samples'])}
+
+def group_style_input(metadata=None,run=None):
+    if run:
+        source=approved_run(run)
+        data=json.loads((source/'parameters.json').read_text(encoding='utf8'))
+        config=data.get('config',data)
+        samples=config['samples']
+        style_file=source/'group_style.json'
+        fallback=json.loads(style_file.read_text(encoding='utf8')) if style_file.is_file() else config
+    else:
+        source=path(metadata)
+        samples=read_sample_sheet(source)
+        fallback={}
+    style=resolve_group_style({},samples,fallback=fallback)
+    return {**style,'source':str(source),'sample_counts':{group:sum(row['Group']==group for row in samples) for group in style['group_order']}}
+
+def render_saved_diversity(job,c):
+    analysis=approved_run(c.get('diversity_run') or c.get('result_run',''))
+    if not (analysis/'qiime_statistics_complete.json').is_file():
+        raise ValueError('请选择已保存完整多样性指标和检验结果的目录；不能用预处理或LEfSe目录重绘')
+    previous=json.loads((analysis/'parameters.json').read_text(encoding='utf8'))
+    parent=approved_run(previous['preprocess'])
+    saved=previous['config']
+    style=resolve_group_style(c,saved['samples'],fallback=saved)
+    config=dict(saved,**style,font=c.get('font') or saved['font'])
+    output=analysis/'05_replots'; output.mkdir(exist_ok=True)
+    run=output/('figures_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]); run.mkdir(); marker(run)
+    job.update(run=str(run),log=str(run/'workflow.log'))
+    style_file=save_group_style(run,style)
+    (run/'parameters.json').write_text(json.dumps({'extension':'diversity-render','preprocess':str(parent),'diversity_run':str(analysis),'config':config,'extension_parameters':dict(c,diversity_run=str(analysis)),'statistics_refit':False},ensure_ascii=False,indent=2),encoding='utf8')
+    figure_root=run/'04_R_figures'/'R_original_style'
+    begin_stage(job,'04_R_figures','仅重绘：保留原抽平、指标及统计结果',{'group_style':style,'statistics_refit':False})
+    command(job,r_command(config,str(ROOT/'render.R'),str(analysis),config['font'],str(parent),config.get('plot_scripts',''),str(style_file),str(figure_root)),run,process_env=r_execution_env(config))
+    summary_file=figure_root/'render_summary.json'
+    if not summary_file.is_file(): raise ValueError('R 绘图结束但没有生成绘图摘要')
+    summary=json.loads(summary_file.read_text(encoding='utf8'))
+    finish_stage(job,{'render':summary,'group_style':style,'statistics_refit':False},['图片保存到独立子目录；复用已有抽平表、多样性指标、坐标及P/q值。'])
+    (run/'complete.json').write_text(json.dumps({'statistics_refit':False,'diversity_run':str(analysis)}),encoding='utf8')
+    job.update(step='按当前分组顺序与配色重绘完成',result={'diversity_run':str(analysis),'group_style':style,'statistics_refit':False})
 
 def extension(job,c,kind):
     """Add analyses to a completed run without reprocessing FASTQ or overwriting it."""
@@ -667,10 +711,13 @@ def extension(job,c,kind):
     selected=[sample for sample in parent_samples if sample['SampleID'] in observed]
     if kind in ('differential','lefse') and {sample['Group'] for sample in selected}!={sample['Group'] for sample in parent_samples}:
         raise ValueError('过滤后某个组已没有有效样本，不能忽略该组进行差异分析')
-    saved=dict(saved,samples=selected)
+    style=resolve_group_style(c,selected,fallback=saved)
+    c=dict(c,**style)
+    saved=dict(saved,samples=selected,**style)
     output.mkdir(exist_ok=True)
     run=output/(kind+'_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]); run.mkdir(); marker(run)
     job.update(run=str(run),log=str(run/'workflow.log'))
+    save_group_style(run,style)
     parameters={'extension':kind,'preprocess':str(parent),'config':saved,'extension_parameters':c,
                 'samples_absent_from_filtered_table':[sample for sample in parent_samples if sample['SampleID'] not in observed]}
     (run/'parameters.json').write_text(json.dumps(parameters,ensure_ascii=False,indent=2),encoding='utf8')
@@ -710,6 +757,7 @@ def worker(job,action,c):
         elif action=='recommend': refresh_quality_advice(job,c)
         elif action=='preprocess': preprocess(job,c)
         elif action=='diversity': diversity(job,c)
+        elif action=='diversity-render': render_saved_diversity(job,c)
         elif action in ('abundance','differential','lefse','lefse-render','functional'): extension(job,c,action)
         if action in ('inspect','preflight'): save_check_results(job,c,action)
         job['status']='done'
@@ -750,6 +798,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             u=urlparse(self.path); p=parse_qs(u.query)
             if u.path=='/api/runtime': self.send(RUNTIME)
+            elif u.path=='/api/group-style': self.send(group_style_input(metadata=p.get('metadata',[None])[0],run=p.get('run',[None])[0]))
             elif u.path=='/api/status':
                 j=JOBS[p['id'][0]]; result={key:value for key,value in j.items() if not key.startswith('_')}
                 logfile=Path(j['log']); result['log_tail']=''
@@ -795,7 +844,7 @@ class Handler(BaseHTTPRequestHandler):
                     except ProcessLookupError: pass
                 self.send({'ok':True}); return
             action=self.path.removeprefix('/api/')
-            if action not in ('preflight','inspect','quality','recommend','preprocess','diversity','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
+            if action not in ('preflight','inspect','quality','recommend','preprocess','diversity','diversity-render','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
             self.send({'id':launch(action,c)})
         except Exception as e: self.send({'error':str(e)},400)
 
