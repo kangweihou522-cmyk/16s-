@@ -4,8 +4,21 @@ import csv, gzip, hashlib, io, json, os, re, secrets, shutil, signal, subprocess
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
+from datetime import datetime, timezone, timedelta
 
 ROOT = Path(__file__).resolve().parent
+
+def service_identity():
+    revision='local'
+    try:
+        result=subprocess.run(['git','-C',str(ROOT),'rev-parse','--short','HEAD'],text=True,capture_output=True,timeout=3)
+        if result.returncode==0: revision=result.stdout.strip()
+    except (OSError,subprocess.TimeoutExpired): pass
+    return {'revision':revision,'source_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            'directory':str(ROOT),'pid':os.getpid(),
+            'started_at':datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds')}
+
+RUNTIME = service_identity()
 TOKEN = secrets.token_urlsafe(32)
 JOBS = {}
 LOCK = threading.Lock()
@@ -500,7 +513,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized(): self.send({'error':'访问被拒绝'},403); return
         try:
             u=urlparse(self.path); p=parse_qs(u.query)
-            if u.path=='/api/status':
+            if u.path=='/api/runtime': self.send(RUNTIME)
+            elif u.path=='/api/status':
                 j=JOBS[p['id'][0]]; result=dict(j)
                 logfile=Path(j['log']); result['log_tail']=''
                 if logfile.exists():
@@ -551,7 +565,7 @@ def main():
     import argparse
     parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=8765); parser.add_argument('--no-browser',action='store_true'); args=parser.parse_args()
     server=ThreadingHTTPServer(('127.0.0.1',args.port),Handler)
-    print(f'16S 工作站已启动：http://localhost:{args.port}\n关闭终端会停止工作站。',flush=True)
+    print(f'16S 工作站已启动：http://localhost:{args.port}\n服务版本：{RUNTIME["revision"]}\n代码目录：{ROOT}\n关闭终端会停止工作站。',flush=True)
     if not args.no_browser:
         try: subprocess.Popen(['cmd.exe','/c','start','',f'http://localhost:{args.port}'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         except OSError: webbrowser.open(f'http://localhost:{args.port}')
