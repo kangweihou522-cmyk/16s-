@@ -1,8 +1,10 @@
 """Input/statistic-cache contracts; the simulated CLI is explicitly not LEfSe."""
 import csv
 import hashlib
+import importlib.util
 import json
 import pickle
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -43,12 +45,16 @@ class SimulatedCLI:
         if executable == 'lefse_format_input.py':
             with Path(tail[0]).open(newline='') as stream:
                 rows = list(csv.reader(stream, delimiter='\t'))
-            features = {row[0].replace('|', '.'): list(map(float, row[1:])) for row in rows[1:]}
+            class_row = int(tail[tail.index('-c') + 1]) - 1
+            subject_row = int(tail[tail.index('-u') + 1]) - 1
+            features = {row[0].replace('|', '.'): list(map(float, row[1:]))
+                        for i, row in enumerate(rows) if i not in (class_row, subject_row)}
             for key, values in list(features.items()):
                 for level in range(1, len(key.split('.'))):
                     features.setdefault('.'.join(key.split('.')[:level]), values)
             with Path(tail[1]).open('wb') as stream:
-                pickle.dump({'feats': features, 'cls': {'class': rows[0][1:]}}, stream)
+                pickle.dump({'feats': features, 'cls': {'class': rows[class_row][1:],
+                                                     'subject': rows[subject_row][1:]}}, stream)
         elif executable == 'python':
             if Path(tail[0]).name == 'prune_formatted.py':
                 # Execute the actual stdlib prune script against a newly generated test pickle.
@@ -225,14 +231,46 @@ class LefseCacheTests(unittest.TestCase):
     def fit(self):
         return lefse.run_lefse(self.job, {'lda_threshold': 2}, self.saved, self.parent, self.api)
 
+    @unittest.skipUnless(importlib.util.find_spec('lefse') and importlib.util.find_spec('biom'),
+                         'Official LEfSe formatter dependencies are not installed')
+    def test_real_formatter_keeps_unique_sample_ids_groups_and_cpm_aligned(self):
+        samples = self.saved['samples']
+        counts, totals = lefse.read_counts(self.parent / 'exported-table/feature-table.tsv', samples)
+        taxonomy = lefse.read_taxonomy(self.parent / 'exported-taxonomy/taxonomy.tsv', counts)
+        data = lefse.build_abundances(counts, taxonomy, samples, totals)
+        lefse._save_input(self.run, counts, totals, samples, data)
+        output = self.run / '01_inputs/official_formatter.pkl'
+        proc = subprocess.run([sys.executable, '-c',
+                               'from lefse.lefse_format_input import format_input; format_input()',
+                               str(self.run / '01_inputs/lefse_input_cpm.tsv'), str(output),
+                               '-c', '1', '-u', '2', '-f', 'r', '-o', '-1'],
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        # Only deserialize this test's freshly generated official formatter output.
+        with output.open('rb') as stream:
+            formatted = pickle.load(stream)
+        subjects = formatted['cls']['subject']
+        self.assertEqual(set(subjects), {sample['SampleID'] for sample in samples})
+        self.assertEqual(len(subjects), len(set(subjects)))
+        expected_groups = {sample['SampleID']: data['groups'][sample['Group']] for sample in samples}
+        self.assertEqual(dict(zip(subjects, formatted['cls']['class'])), expected_groups)
+        self.assertNotIn('SampleID', formatted['feats'])
+        for feature in data['features']:
+            expected = dict(zip((sample['SampleID'] for sample in samples), feature['cpm']))
+            self.assertEqual(formatted['feats'][feature['result_feature']], [expected[sid] for sid in subjects])
+
     def test_fit_uses_official_cli_flags_with_single_normalization_and_preserves_wrapper_parameters(self):
         result = self.fit()
         commands = self.api.commands
         formatter = next(args for args in commands if Path(args[5]).name == 'lefse_format_input.py')
         model = next(args for args in commands if Path(args[5]).name == 'lefse_run.py')
-        self.assertEqual(formatter[-6:], ['-c', '1', '-f', 'r', '-o', '-1'])
-        self.assertNotIn('-u', formatter)
+        self.assertEqual(formatter[-8:], ['-c', '1', '-u', '2', '-f', 'r', '-o', '-1'])
         self.assertNotIn('-s', formatter)
+        with (self.run / '01_inputs/lefse_input_cpm.tsv').open(newline='') as stream:
+            input_rows = list(csv.reader(stream, delimiter='\t'))
+        self.assertEqual(input_rows[1], ['SampleID', '001', '002', '003', '004'])
+        self.assertNotIn('SampleID', self.api.fitted_features)
+        self.assertFalse(lefse.parameters({})['paired_design'])
         self.assertEqual(model[model.index('-l') + 1], '0')
         self.assertEqual(model[model.index('-y') + 1], '0')
         self.assertEqual(json.loads((self.run / 'parameters.json').read_text()), self.original_parameters)

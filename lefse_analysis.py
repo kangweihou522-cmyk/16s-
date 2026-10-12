@@ -64,7 +64,8 @@ def parameters(config):
     return {'lefse_env': env, 'lda_threshold': _number(config.get('lda_threshold', 2), 'LDA 阈值'),
             'kw_alpha': kw, 'wilcoxon_alpha': wilcoxon,
             'multiclass_strategy': strategies[str(strategy)], 'fit_lda_threshold': 0,
-            'wilcoxon_min_samples': 10, 'subclass': None, 'subject': None,
+            'wilcoxon_min_samples': 10, 'subclass': None,
+            'subject': 'unique SampleID (formatter metadata only)', 'paired_design': False,
             'normalization': 'CPM from each original filtered ASV sample total; formatter -o -1'}
 
 
@@ -356,10 +357,12 @@ def _save_input(run, counts, totals, samples, data):
     _tsv(folder / 'others_counts.tsv', ['Rank', 'OriginalParentLineage', 'DisplayTaxon', 'ExcludedASVCount', *ids],
          [(row['rank'], row['parent_lineage'], 'Others', row['asv_count'], *row['counts']) for row in data['others']])
     _tsv(folder / 'taxon_counts.tsv', ['Feature', *ids], [(row['input_feature'], *row['counts']) for row in data['features']])
-    # No SampleID row: -u means repeated subject, which this metadata does not contain.
+    # LEfSe 1.1.2 requires subject metadata even for independent samples.
+    # Each SampleID is unique; this labels samples without introducing pairs.
     with (folder / 'lefse_input_cpm.tsv').open('w', encoding='utf8', newline='') as stream:
         writer = csv.writer(stream, delimiter='\t')
         writer.writerow(['Class', *(data['groups'][sample['Group']] for sample in samples)])
+        writer.writerow(['SampleID', *ids])
         writer.writerows([row['input_feature'], *(format(value, '.17g') for value in row['cpm'])] for row in data['features'])
     _json(folder / 'allowed_features.json', [row['result_feature'] for row in data['features']])
     ranks = {}
@@ -394,6 +397,7 @@ def run_lefse(job, config, saved, parent, api):
     _json(run / '01_inputs/runtime.json', runtime)
     _json(run / 'lefse_parameters.json', settings)
     api.finish_stage(job, summary, ['CPM 分母是每个原始样本的过滤后 ASV 总计数；不按层级行之和重复归一化。',
+                                   '唯一 SampleID 行用于满足官方 formatter 的 subject 元数据要求；不是配对或重复测量设计。',
                                    '未知末级分类显示为 Others；不把无关未知 ASV 合并作为候选 biomarker。已注释的下级分类保留；未知中间分支使用保存映射的上下文编码，且其本身不检验。'])
     api.begin_stage(job, '02_statistics', '官方 LEfSe：KW、组间一致性与 LDA', settings)
     (run / '02_statistics').mkdir(exist_ok=True)
@@ -401,7 +405,7 @@ def run_lefse(job, config, saved, parent, api):
     prefix = _prefix(runtime_config, api)
     if data['features']:
         api.command(job, prefix + [runtime['paths']['format'], str(run / '01_inputs/lefse_input_cpm.tsv'),
-                                  str(run / '01_inputs/lefse_input.pkl'), '-c', '1', '-f', 'r', '-o', '-1'], run)
+                                  str(run / '01_inputs/lefse_input.pkl'), '-c', '1', '-u', '2', '-f', 'r', '-o', '-1'], run)
         script = _script(run / '01_inputs/prune_formatted.py', PRUNE_SCRIPT, job)
         api.command(job, prefix + ['python', script, str(run / '01_inputs/lefse_input.pkl'),
                                   str(run / '01_inputs/allowed_features.json'), str(run / '01_inputs/pruning.json')], run)

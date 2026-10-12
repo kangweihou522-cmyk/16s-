@@ -206,6 +206,8 @@ QIIME 2 ANCOM在计数表上加官方伪计数后运行composition ancom，输�
 
 选择本机 `lefse` 环境，使用未抽平ASV表构建L2–L7完整谱系；按每样本ASV总数转换成CPM一次，官方formatter关闭再次归一化。不同父分类的同名菌保持分开。未知末级分类、norank/uncultured/unclassified/Incertae_Sedis等在对应层级记录为Others，不作为候选标志菌；已注释的下级分类仍保留，未知中间分支采用可逆的上下文编码，其本身不检验。保存输入、名称映射、未知分类处理和实际测试特征数。
 
+formatter输入前两行分别为Class与唯一SampleID，使用 `-c 1 -u 2 -f r -o -1`，避开官方1.1.2在无subject元数据时的 `KeyError: 'subject'`。SampleID作为样本标识保留，不成为丰度特征；没有配对或重复测量假定，实际参数与阶段说明记录这一用途。
+
 默认KW/一致性阈值0.05、one-against-all多组策略；可选较严格all-against-all。只有SampleID与Group，不假定配对或subclass。官方LEfSe在每类少于10样本时的一致性步骤采用中位数规则，阶段说明记录这一行为。拟合以LDA截断0保留已计算的正得分，然后按用户阈值筛选；默认显示LDA>2。
 
 完成后显示柱状图和分类谱系分支图，各有PNG/SVG下载按钮。修改阈值并点击“重绘并预览”，只读取缓存得分，保存新预览目录；不重算KW、LDA或覆盖原图。分支图表示分类关系。无符合阈值的标志菌时生成明确的无命中提示图，不伪造分支或标志菌。原始检验结果有哈希验证。
