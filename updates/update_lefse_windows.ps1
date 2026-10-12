@@ -11,7 +11,8 @@ $bundleFile = Join-Path $env:TEMP ('16s-update-' + [guid]::NewGuid().ToString('N
 function Invoke-CheckedWsl {
     param([string[]]$NativeArguments)
     $ErrorActionPreference = 'Continue'
-    & wsl.exe -d Ubuntu-24.04 -u root -- @NativeArguments
+    # Bypass the Linux shell so Windows path backslashes remain literal.
+    & wsl.exe -d Ubuntu-24.04 -u root --exec @NativeArguments
     if ($LASTEXITCODE -ne 0) { throw ('WSL command failed; exit code: ' + $LASTEXITCODE) }
 }
 

@@ -130,3 +130,5 @@ R测试数据是人工标准布局导出结果，不是用户真实样本；测�
 - 制作8268字节Git bundle，目标提交759b947，前置提交5fec64a，记录并校验SHA256。临时Git仓库只获取旧版提交（确认未含目标对象），实际verify/fetch/fast-forward后精确达到目标提交，工作树干净且包含SampleID与-u 2修复。测试准备时短提交号无法被本地fetch识别，改为完整提交号后验证通过。
 - Windows入口通过本机127.0.0.1:10808代理限时下载，校验更新包、检查main分支与本地改动、保留origin及历史，仅fast-forward源码。原数据与分析结果不在更新范围。成功后从WSL启动工作站。
 - 云环境没有PowerShell，未执行Windows脚本或验证用户Windows网络下载；已验证的是实际Git更新包和Linux离线导入。复用此前真实formatter与20项验证，不重跑统计模型。
+
+- 用户已确认Windows入口和更新包下载成功，后续 `wslpath` 收到丢失反斜杠的Windows路径。修正WSL入口为 `--exec`，避免默认Linux shell再次解析参数；复现shell会移除反斜杠，直接进程传参保持原路径。此次只修改入口参数，更新包与已验证Git导入保持不变；实际Windows/WSL运行仍需用户确认。
