@@ -19,3 +19,5 @@ The user prioritizes low AI usage and small, purpose-driven changes.
 - `launch.py` and `启动.sh`: startup and conservative source updates.
 - `安装依赖.sh`: separate R environment; preserve the QIIME environment.
 - `README.md` / `VALIDATION.md`: workflow and previous validation evidence.
+
+- Extended modules: `abundance_tables.py` (ASV/L2–L7 exports), `differential_analysis.py` + `differential_ancombc.R` (explicit ANCOM-BC2/QIIME ANCOM), `lefse_analysis.py` (cached threshold plots), `functional_prediction.py` (PICRUSt2/KO maps). `app.extension` owns isolation and completion markers. Do not refit LEfSe for LDA previews or use relative/rarefied counts for ANCOM-BC2.

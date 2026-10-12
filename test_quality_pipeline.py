@@ -41,7 +41,13 @@ def materialize_qiime_outputs(job, config, *args):
                     writer.writerow([key, *([number] * 300)])
     elif source == 'dada2-stats.qza':
         (destination / 'stats.tsv').write_text('sample-id\tinput\tfiltered\tdenoised\tmerged\tnon-chimeric\n#q2:types\tnumeric\tnumeric\tnumeric\tnumeric\tnumeric\n' + ''.join(f'{sid}\t1000\t950\t900\t800\t{125*(i+1)}\n' for i, sid in enumerate(ids)), encoding='utf8')
-    elif source == 'alpha-rarefaction.qzv':
+    elif Path(source).name=='taxonomy.qza':
+        (destination/'taxonomy.tsv').write_text('Feature ID\tTaxon\tConfidence\nASV1\td__Bacteria; p__Bacillota; c__Bacilli; o__Lactobacillales; f__Lactobacillaceae; g__Lactobacillus; s__acidophilus\t0.99\n',encoding='utf8')
+    elif Path(source).name=='taxa-barplot.qzv':
+        (destination/'index.html').write_text('Synthetic taxa barplot export')
+    elif Path(source).name in ('counts.qza','relative-frequency.qza','filtered-table.qza','dada2-table.qza'):
+        (destination/'feature-table.biom').write_bytes(b'Synthetic BIOM placeholder; command mock supplies TSV')
+    elif Path(source).name=='alpha-rarefaction.qzv':
         for metric,value in [('observed_features',1),('shannon',0),('faith_pd',0),('simpson',0),('chao1',1),('goods_coverage',1),('pielou_e',0)]:
             (destination/(metric+'.csv')).write_text('sample-id,depth-10_iter-1,depth-50_iter-1,depth-100_iter-1,Group\n'+''.join(f'{sample["SampleID"]},{value},{value},{value},{sample["Group"]}\n' for sample in samples),encoding='utf8')
 
@@ -62,7 +68,7 @@ class QualityPipelineTests(unittest.TestCase):
         if 'biom' in args:
             destination = Path(args[args.index('-o') + 1])
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text('#OTU ID\t001\nASV1\t125\n', encoding='utf8')
+            destination.write_text('#OTU ID\t001\nASV1\t'+('1' if 'relative_export' in destination.parts else '125')+'\n', encoding='utf8')
 
     def test_quality_exports_tables_and_recommends_without_dada2(self):
         job = {}; calls = []

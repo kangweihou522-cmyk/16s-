@@ -12,6 +12,12 @@ from execution_record import prepare_execution, capture_r_sources, command_expla
 
 ROOT = Path(__file__).resolve().parent
 
+def module_api():
+    from types import SimpleNamespace
+    names=('ROOT','artifact_path','q','command','r_command','r_execution_env','find_conda','conda_cmd',
+           'path','begin_stage','finish_stage','stage_report','export_artifact','probe')
+    return SimpleNamespace(**{name:globals()[name] for name in names})
+
 def service_identity():
     revision='local'
     try:
@@ -528,6 +534,9 @@ def preprocess(job,c,quality_only=False):
     (run/'depth_recommendation.json').write_text(json.dumps(depth_advice,ensure_ascii=False,indent=2),encoding='utf8')
     job.setdefault('result',{})['depth_advice']=depth_advice
     finish_stage(job,{'sample_depths':depth_counts,'max_depth':curve_depth,'metrics':curve_metrics,'depth_advice':depth_advice},['此处只生成多个深度的诊断曲线，原始过滤后特征表不被覆盖。','正式抽平深度推荐为严格低于本批最低过滤后 reads 的最大整百数；可人工修改，不读取 P 值。','曲线的三点平台判断独立显示，阈值为工作站启发式，不是官方唯一最佳深度。','Pielou 均匀度的 QIIME 曲线参数名为 pielou_e，核心分析保存的向量名为 evenness。'])
+    from abundance_tables import run_abundance
+    abundance=run_abundance(job,saved,module_api())
+    job.setdefault('result',{})['abundance']=abundance
     inventory(run)
     (run/'preprocess_complete.json').write_text(json.dumps({'completed_at':time.time()}))
     job['step']='预处理完成；查看曲线和样本深度后选择抽平深度'
@@ -636,6 +645,61 @@ def diversity(job,c):
     (sub/'complete.json').write_text(json.dumps({'completed_at':time.time(),'note':'保存本次随机抽平表；重跑可能不同。'}),encoding='utf8')
     job['step']='分析完成：SVG、统计表、QZA/QZV 与抽平特征表已保存'
 
+def extension(job,c,kind):
+    """Add analyses to a completed run without reprocessing FASTQ or overwriting it."""
+    c={key:value for key,value in c.items() if value is not None and str(value).strip()!=''}
+    api=module_api()
+    if kind=='lefse-render':
+        analysis=approved_run(c.get('lefse_run',''))
+        if not (analysis/'lefse_complete.json').is_file(): raise ValueError('请选择已完成的 LEfSe 结果目录，不能用其他任务目录重绘')
+        previous=json.loads((analysis/'parameters.json').read_text(encoding='utf8'))
+        parent=approved_run(previous['preprocess']); saved=previous['config']
+        output=analysis/'04_previews'
+    else:
+        parent=approved_run(c.get('run',''))
+        if not (parent/'preprocess_complete.json').is_file(): raise ValueError('扩展分析需要本工作站已完成预处理的 run 目录；不需要重新运行 DADA2')
+        saved=json.loads((parent/'parameters.json').read_text(encoding='utf8'))
+        output=parent/'11_extensions'
+    if c.get('conda'): saved=dict(saved,conda=c['conda'])
+    parent_samples=json.loads((parent/'parameters.json').read_text(encoding='utf8'))['samples']
+    observed=totals(parent)
+    if set(observed)-{sample['SampleID'] for sample in parent_samples}: raise ValueError('过滤后表中存在未列入本批分组的样本')
+    selected=[sample for sample in parent_samples if sample['SampleID'] in observed]
+    if kind in ('differential','lefse') and {sample['Group'] for sample in selected}!={sample['Group'] for sample in parent_samples}:
+        raise ValueError('过滤后某个组已没有有效样本，不能忽略该组进行差异分析')
+    saved=dict(saved,samples=selected)
+    output.mkdir(exist_ok=True)
+    run=output/(kind+'_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]); run.mkdir(); marker(run)
+    job.update(run=str(run),log=str(run/'workflow.log'))
+    parameters={'extension':kind,'preprocess':str(parent),'config':saved,'extension_parameters':c,
+                'samples_absent_from_filtered_table':[sample for sample in parent_samples if sample['SampleID'] not in observed]}
+    (run/'parameters.json').write_text(json.dumps(parameters,ensure_ascii=False,indent=2),encoding='utf8')
+    write_metadata(run,[(sample['SampleID'],sample['Group']) for sample in saved['samples']])
+    if kind=='abundance':
+        from abundance_tables import run_abundance
+        result=run_abundance(job,saved,api,source_run=parent)
+        job['result']={'abundance_run':str(run),'abundance':result}
+    elif kind=='differential':
+        from differential_analysis import run_differential
+        result=run_differential(job,c,saved,parent,api)
+        if result is not None: job['result']=result
+    elif kind=='lefse':
+        from lefse_analysis import run_lefse
+        result=run_lefse(job,c,saved,parent,api)
+        if result is not None: job['result']=result
+    elif kind=='lefse-render':
+        from lefse_analysis import render_lefse
+        result=render_lefse(job,c,analysis,api)
+        if result is not None: job['result']=result
+    elif kind=='functional':
+        from functional_prediction import run_functional
+        result=run_functional(job,c,saved,parent,api)
+        if result is not None: job['result']=result
+    else: raise ValueError('未知扩展分析')
+    completion=run/(kind.replace('-','_')+'_complete.json')
+    if not completion.exists(): completion.write_text(json.dumps({'completed_at':time.time(),'preprocess':str(parent)}),encoding='utf8')
+    job['step']={'abundance':'ASV 与 L2–L7 丰度及相对丰度导出完成','differential':'门到属差异菌分析完成','lefse':'LEfSe 分析及图片完成','lefse-render':'按所选 LDA 阈值重绘完成，未重算检验','functional':'PICRUSt2 预测及自选 KO 注释汇总完成'}[kind]
+
 def worker(job,action,c):
     try:
         prepare_execution(job,ROOT,action,c,RUNTIME)
@@ -646,6 +710,7 @@ def worker(job,action,c):
         elif action=='recommend': refresh_quality_advice(job,c)
         elif action=='preprocess': preprocess(job,c)
         elif action=='diversity': diversity(job,c)
+        elif action in ('abundance','differential','lefse','lefse-render','functional'): extension(job,c,action)
         if action in ('inspect','preflight'): save_check_results(job,c,action)
         job['status']='done'
     except Exception as e:
@@ -730,7 +795,7 @@ class Handler(BaseHTTPRequestHandler):
                     except ProcessLookupError: pass
                 self.send({'ok':True}); return
             action=self.path.removeprefix('/api/')
-            if action not in ('preflight','inspect','quality','recommend','preprocess','diversity'): raise ValueError('未知操作')
+            if action not in ('preflight','inspect','quality','recommend','preprocess','diversity','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
             self.send({'id':launch(action,c)})
         except Exception as e: self.send({'error':str(e)},400)
 

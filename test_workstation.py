@@ -76,7 +76,7 @@ class BackendTests(unittest.TestCase):
         samples = config.get("samples", config.get("config", {}).get("samples", []))
         ids = [x["SampleID"] for x in samples]
         output.write_text("#OTU ID\t" + "\t".join(ids) + "\nASV1\t" +
-                          "\t".join(str(125 * (i + 1)) for i in range(len(ids))) + "\n", encoding="utf8")
+                          "\t".join('1' if 'relative_export' in output.parts else str(125 * (i + 1)) for i in range(len(ids))) + "\n", encoding="utf8")
 
     def test_paired_ids_and_leading_zero_sample_names(self):
         self.metadata([("0001", "A"), ("0002", "B")])

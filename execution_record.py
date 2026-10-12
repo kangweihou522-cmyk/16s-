@@ -39,6 +39,10 @@ def prepare_execution(job, root, action, config, runtime):
         ('run_layout.py', '结果路径、计数汇总和每一步处理说明。'),
         ('quality_advice.py', '读取逐位置质量统计，生成 DADA2 参数建议。'),
         ('depth_advice.py', '依据过滤后样本计数推荐抽平深度，另附曲线诊断。'),
+        ('abundance_tables.py', 'ASV 与 L2–L7 计数、相对丰度和分类注释导出。'),
+        ('differential_analysis.py', '门到属的 ANCOM-BC2 / QIIME ANCOM 差异分析编排。'),
+        ('lefse_analysis.py', 'LEfSe 分类谱系预处理、检验和基于缓存的 LDA 阈值重绘。'),
+        ('functional_prediction.py', 'PICRUSt2、NSTI 与用户 KO 数据库注释和层级汇总。'),
         ('execution_record.py', '记录实际执行命令、参数及源码文本。'),
     ]:
         capture_source(job, Path(root) / name, 'Python', explanation)
@@ -149,7 +153,9 @@ def finalize_execution(job):
         lines.extend(['cd -- ' + shlex.quote(item['cwd']), shlex.join(item['args'])])
     if not record['commands']:
         lines.append('\n# 本任务未通过命令执行器运行外部命令；Python 处理及检查结果见阶段报告。')
-    for logical in ['manifest.tsv', 'metadata.tsv', 'layout.json']:
+    for logical in ['manifest.tsv', 'metadata.tsv', 'layout.json', 'differential_options.json',
+                    'lefse_parameters.json', '00_inputs/effective_parameters.json',
+                    '03_figures/render_summary.json', '10_abundance/manifest.json']:
         # Use the saved layout, preserving both organized and older flat runs.
         from run_layout import artifact_path
         filename = artifact_path(run, logical)
@@ -161,7 +167,7 @@ def finalize_execution(job):
             text = '# 本任务没有实际调用 R 脚本。\n'
         (folder / (category + '完整代码.txt')).write_text(text, encoding='utf8')
         lines.extend(['\n# ' + category + ' 完整源码快照及说明', text])
-    if effective and record['action'] == 'diversity':
+    if effective and 'preprocess' in effective:
         parent = Path(effective['preprocess'])
         prior = sorted((parent / '09_execution_code').glob('*/完整运行代码.txt'))
         if prior:
@@ -174,6 +180,19 @@ def finalize_execution(job):
                 filename = parent / name
                 if filename.is_file():
                     lines.extend(['# 旧版原始记录：' + str(filename), filename.read_text(encoding='utf8')])
+        dependencies=effective.get('extension_parameters',{})
+        for key,label in [('abundance_run','复用的丰度导出'),('lefse_run','用于重绘的 LEfSe 原始检验')]:
+            if key=='abundance_run' and record['action']!='differential': continue
+            if key=='lefse_run' and record['action']!='lefse-render': continue
+            value=dependencies.get(key)
+            if not value: continue
+            dependency=Path(value)
+            if re_match := __import__('re').match(r'^([A-Za-z]):[\\/](.*)$',str(value)):
+                dependency=Path('/mnt/'+re_match[1].lower())/re_match[2].replace('\\','/')
+            dependency=dependency.expanduser().resolve()
+            if dependency in (parent,run) or not (dependency/'workstation_run.json').is_file(): continue
+            for filename in sorted((dependency/'09_execution_code').glob('*/完整运行代码.txt')):
+                lines.extend(['\n# 关联历史任务：'+label+'；'+str(filename),filename.read_text(encoding='utf8')])
     lines.extend('# 源码记录提示：' + warning for warning in record['warnings'])
     (folder / '完整运行代码.txt').write_text('\n'.join(lines) + '\n', encoding='utf8')
     job['execution_code_directory'] = str(folder)

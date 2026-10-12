@@ -1,4 +1,4 @@
-# Windows / WSL 16S 本地分析工作站 v0.5
+# Windows / WSL 16S 本地分析工作站 v0.6
 
 浏览器操作，WSL Ubuntu 中使用你自己安装的 **QIIME 2 和 R** 计算。原始测序数据只读，每次生成独立结果目录；分类器由用户选择本地 `.qza` 文件。程序不调用任何 AI API，不需保持 ChatGPT/Codex 会话运行。
 
@@ -173,6 +173,57 @@ v0.4修复路径转换把 `qiime diversity alpha` 的动作名误改成 `03_stat
 每个阶段目录都有 `说明.md` 和 `report.json`，记录参数、实际数量、保存文件和完成/跳过/失败状态。旧版已有结果保留原位置，新程序通过有版本号的布局映射兼容读取；不搬动或覆盖旧分析。
 
 本版本不是任意步骤断点恢复工具：质量阶段可继续到预处理，完成预处理可创建多次不同深度分析；失败的部分结果不直接重用。重启网页后台后原文件保留，内存任务状态丢失；使用历史结果目录查看文件或开始下一阶段。
+
+## 丰度、差异菌与功能预测（v0.6）
+
+预处理现在自动补齐丰度导出。网页第4部分也可选择历史已完成的预处理目录，单独补做丰度、差异菌、LEfSe 或功能预测；不重跑DADA2。独立任务保存在父目录的 `11_extensions/<类型>_<时间>_<编号>/`，每一步有说明和实际代码记录。每次任务保留旧文件。
+
+### 所有丰度与相对丰度表
+
+`10_abundance/` 包含 ASV，以及 L2门、L3纲、L4目、L5科、L6属、L7种的 QZA、QZV、BIOM、TSV和CSV；每套计数表都有相对丰度QZA及TSV/CSV。ASV另有 `counts_with_taxonomy`、`relative_with_taxonomy` 和只包含过滤后ASV的 `filtered_taxonomy.tsv/csv`。分类注释按FeatureID匹配，CSV正确引用含逗号的分类名，保留样本前导零。表使用过滤后未抽平计数，所谓计数丰度不是经过外部标准品校准的绝对细胞数量。
+
+原 `taxonomy.qza` 中额外ASV可由官方taxa collapse忽略，折叠输入仍是过滤后表；不伪造不存在的taxonomy过滤动作。`taxa_barplot_data/` 保存原分类条形图导出内容。`manifest.json`记录文件位置、各层级特征数、样本计数及源表/分类SHA256，差异分析复用时检查批次与实际聚合结果。
+
+### 门到属的差异菌
+
+界面明确提供 **ANCOM-BC2** 和 **QIIME 2 ANCOM**，两者与原始ANCOM-II不同。原始作者的归档ANCOM-II实现尚未接入；它的零值、三组及以上数据处理需要独立验证，不能冒充ANCOM-BC2。
+
+ANCOM-BC2直接使用L2–L6未抽平整数计数，`Group`按无序分类变量处理；参考组可选，留空优先CON，否则第一组。默认出现比例0.1、lib_cut=0、alpha=0.05、BH校正、结构零检测和伪计数敏感性检查；三组及以上另输出总体与两两比较。保留完整模型RDS、效应/SE/p/q表、结构零/纳入情况、警告与PNG/SVG效应图。图展示按q排序的前25项可估计效应，差异判定读取官方结果字段；不可估计值保留NA，失败层级注明原因并保留其他已完成结果。
+
+首次使用ANCOM-BC2，在Ubuntu的源码目录执行：
+
+```bash
+bash install_differential.sh
+```
+
+它创建独立 `16s-workstation-ancom` R环境，不修改QIIME或已有绘图环境。安装包求解与真实ANCOM-BC2模型尚未在此云环境执行；运行时检查实际依赖与版本。
+
+QIIME 2 ANCOM在计数表上加官方伪计数后运行composition ancom，输出原始QZV、W和官方拒绝零假设结果、PNG/SVG W图。图展示W排序前25项。它是总体Group检验，不产生ANCOM-BC2的效应/SE/p/q，界面的alpha/出现比例仅用于ANCOM-BC2。本方法使用已有QIIME环境及绘图R环境。两种方法均至少要求两组、每组两个有效样本；此最低运行检查不等于充足的统计功效。
+
+### LEfSe与LDA阈值预览
+
+选择本机 `lefse` 环境，使用未抽平ASV表构建L2–L7完整谱系；按每样本ASV总数转换成CPM一次，官方formatter关闭再次归一化。不同父分类的同名菌保持分开。未知末级分类、norank/uncultured/unclassified/Incertae_Sedis等在对应层级记录为Others，不作为候选标志菌；已注释的下级分类仍保留，未知中间分支采用可逆的上下文编码，其本身不检验。保存输入、名称映射、未知分类处理和实际测试特征数。
+
+默认KW/一致性阈值0.05、one-against-all多组策略；可选较严格all-against-all。只有SampleID与Group，不假定配对或subclass。官方LEfSe在每类少于10样本时的一致性步骤采用中位数规则，阶段说明记录这一行为。拟合以LDA截断0保留已计算的正得分，然后按用户阈值筛选；默认显示LDA>2。
+
+完成后显示柱状图和分类谱系分支图，各有PNG/SVG下载按钮。修改阈值并点击“重绘并预览”，只读取缓存得分，保存新预览目录；不重算KW、LDA或覆盖原图。分支图表示分类关系。无符合阈值的标志菌时生成明确的无命中提示图，不伪造分支或标志菌。原始检验结果有哈希验证。
+
+### PICRUSt2与用户数据库
+
+选择本机 `picrust2` 环境。使用过滤后未抽平BIOM与完全对应的代表序列，默认最低比对比例0.8、最大NSTI2.0、明确预测EC和KO；保留完整PICRUSt2输出和实际软件版本。没有根据保留率自动降低质量阈值。
+
+必须选择KO注释映射TSV/CSV，表头恰为：
+
+```text
+KO	L1	L2	L3	pathway_id	gene	KO_name	EC
+K00844	Metabolism	Carbohydrate metabolism	Glycolysis / Gluconeogenesis	PATH:ko00010	HK	hexokinase	2.7.1.1
+```
+
+TSV建议从Excel另存为UTF-8制表符文件。原数据库字节副本、SHA256和归一化后的注释保存在任务中。它用于预测结果注释与汇总，**不替代PICRUSt2预测参考库**。细菌ref_dir1/古菌ref_dir2可单独选择，留空使用安装版本默认参考；自选参数会检查已安装CLI支持情况（按官方2.6.2参数接入）。当前主流程已排除古菌，因此古菌参考选项不会恢复已过滤数据。
+
+输出KO、EC、MetaCyc和KEGG L1/L2/L3/pathway的丰度及相对丰度TSV/CSV。MetaCyc是官方EC/MinPath推断；自选KO映射的KEGG表是按成员关系求和，不能当作已完成的通路重建。同一KO在同一类别只计一次；KO可属于多个类别，类别总和可能超过KO总和。L2/L3保留父级上下文；相对丰度分母是该输出表的每样本行总和，分母另存。保留未匹配KO，并按实际可读结果报告NSTI、对齐排除及NSTI排除的ASV/序列比例；缺少相应文件时明确标记无法核实。
+
+16S功能预测是推断，完整真实统计及PICRUSt2/LEfSe生物学处理仍需在用户本机环境验证。此云环境验证了编排、读写、界面和部分真实R/Matplotlib绘图，没有把模拟数据视为真实分析成功。
 
 ## 验证
 
