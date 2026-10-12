@@ -58,10 +58,11 @@ save_plot <- function(p,name,w,h) {
 }
 theme_base <- function() ggplot2::theme_minimal(base_size=14,base_family=font)+
   ggplot2::theme(panel.grid=ggplot2::element_blank(),panel.border=ggplot2::element_rect(color='black',fill=NA),axis.text=ggplot2::element_text(face='bold'),axis.title=ggplot2::element_text(face='bold'),strip.background=ggplot2::element_rect(fill='gray80',color='black'))
+alpha_titles <- c(observed_features='Observed features',shannon='Shannon diversity',evenness='Pielou evenness',faith_pd='Faith phylogenetic diversity',chao1='Chao1 richness',simpson='Simpson diversity',goods_coverage="Good's coverage")
 alpha <- list(); annotations <- list(); overall <- list(); pairwise <- list(); alpha_ids <- NULL
-for (metric in c('observed_features','shannon','evenness','faith_pd','chao1','simpson','goods_coverage')) {
+for (metric in names(alpha_titles)) {
   f <- result_path(run,'exports','alpha',metric,'alpha-diversity.tsv')
-  if (!file.exists(f)) { note(paste('Alpha export missing:',metric)); next }
+  if (!file.exists(f)) stop('Required alpha export missing: ',metric,' (',f,'). Export the saved QIIME result before rendering.')
   v <- tab(f); if (ncol(v)!=2) stop('Invalid alpha vector: ',f)
   d <- match_md(v[[1]])
   if (!is.null(alpha_ids) && !setequal(alpha_ids,d$SampleID)) stop('Alpha metrics have different sample sets.')
@@ -90,10 +91,17 @@ for (metric in c('observed_features','shannon','evenness','faith_pd','chao1','si
 if (length(alpha)) {
   a <- do.call(rbind,alpha); a$Metric <- factor(a$Metric,levels=names(alpha))
   an <- do.call(rbind,annotations); an$Metric <- factor(an$Metric,levels=names(alpha)); an$Group <- factor(an$Group,levels=groups)
-  if (original) p <- original_alpha_plot(a,an,font,colors) else p <- ggplot2::ggplot(a,ggplot2::aes(Group,Value,color=Group))+
-    ggplot2::geom_boxplot(fill=NA,outlier.shape=NA,width=.6)+ggplot2::geom_jitter(position=ggplot2::position_jitter(width=.2,seed=123),size=1.5)+
-    ggplot2::facet_wrap(~Metric,ncol=min(4,length(alpha)),scales='free_y')+ggplot2::scale_color_manual(values=colors)+theme_base()+ggplot2::theme(legend.position='none')+ggplot2::labs(x='',y='')
-  save_plot(p,'alpha/alpha_diversity',max(6,4.75*if (original) length(alpha) else min(4,length(alpha))),if (original) 5 else 5*ceiling(length(alpha)/4))
+  unlink(file.path(out,'alpha',paste0('alpha_diversity.',c('svg','pdf','png'))))
+  for (metric in names(alpha)) {
+    d <- droplevels(a[a$Metric==metric,,drop=FALSE]); annotation <- droplevels(an[an$Metric==metric,,drop=FALSE])
+    if (original) p <- original_alpha_plot(d,annotation,font,colors,alpha_titles)+ggplot2::labs(y=alpha_titles[[metric]]) else p <-
+      ggplot2::ggplot(d,ggplot2::aes(Group,Value,color=Group))+
+      ggplot2::geom_boxplot(fill=NA,outlier.shape=NA,width=.6)+ggplot2::geom_jitter(position=ggplot2::position_jitter(width=.2,seed=123),size=1.5)+
+      ggplot2::scale_color_manual(values=colors)+theme_base()+ggplot2::theme(legend.position='none')+ggplot2::labs(title=alpha_titles[[metric]],x='',y=alpha_titles[[metric]])
+    save_plot(p,paste0('alpha/',metric),if (original) 4.75 else 6,5)
+    csv(d,file.path(out,'alpha',paste0(metric,'_plot_input.csv')))
+    csv(annotation,file.path(out,'alpha',paste0(metric,'_letters_positions.csv')))
+  }
   csv(a,file.path(out,'alpha','alpha_plot_input.csv')); csv(an,file.path(out,'alpha','alpha_letters_positions.csv'))
   if (length(overall)) csv(do.call(rbind,overall),file.path(out,'alpha','alpha_KW_saved.csv'))
   if (length(pairwise)) csv(do.call(rbind,pairwise),file.path(out,'alpha','alpha_pairwise_KW_BH_saved.csv'))

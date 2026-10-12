@@ -7,6 +7,7 @@ from urllib.parse import urlparse, parse_qs, quote
 from datetime import datetime, timezone, timedelta
 from run_layout import initialize_layout, artifact_path, mapped_argument, quality_counts, denoising_counts, table_summary, stage_report
 from quality_advice import recommend_parameters
+from depth_advice import read_curves, recommend_depth
 
 ROOT = Path(__file__).resolve().parent
 
@@ -35,8 +36,12 @@ def path(s):
     return Path(s).expanduser().resolve()
 
 def integer(c, key, low, high):
-    v = int(c[key])
-    if not low <= v <= high: raise ValueError(f'{key} 必须在 {low}–{high} 之间')
+    names={'trunc_f':'R1 截断位置','trunc_r':'R2 截断位置','trim_f':'R1 左端额外 trim','trim_r':'R2 左端额外 trim','threads':'线程数','min_frequency':'ASV 全表最低总丰度','max_depth':'抽平曲线最大深度','amplicon':'预计扩增子长度','depth':'本次抽平深度','permutations':'β 置换次数'}
+    label=names.get(key,key); raw=c.get(key)
+    if raw is None or not str(raw).strip(): raise ValueError(f'请填写{label}（整数）；如需自动值，请先获取本批结果的推荐')
+    if isinstance(raw,bool) or not re.fullmatch(r'[+-]?\d+',str(raw).strip()): raise ValueError(f'{label}必须为整数，当前输入为 {raw!r}')
+    v = int(str(raw).strip())
+    if not low <= v <= high: raise ValueError(f'{label}必须在 {low}–{high} 之间')
     return v
 
 def read_sample_sheet(p):
@@ -190,7 +195,17 @@ def command(job,args,cwd=None,process_env=None):
     if job.get('cancel'): raise RuntimeError('用户已停止任务')
 
 def q(job,c,*args):
-    command(job,conda_cmd(c)+['qiime',*(mapped_argument(Path(job['run']), arg) for arg in args)],job['run'])
+    run=Path(job['run']); values=list(map(str,args))
+    for index in range(1,len(values)):
+        option=values[index-1]
+        is_path=option.startswith(('--i-','--o-')) or (option.startswith('--m-') and option.endswith('-file')) or option in ('--input-path','--output-path','--output-dir')
+        if not is_path: continue
+        values[index]=mapped_argument(run,values[index])
+        if option.startswith('--o-') or option in ('--output-path','--output-dir'):
+            # QIIME output directories must themselves remain absent until the action creates them.
+            output=Path(values[index]); output=output if output.is_absolute() else run/output
+            output.parent.mkdir(parents=True,exist_ok=True)
+    command(job,conda_cmd(c)+['qiime',*values],run)
 
 def begin_stage(job,folder,title,parameters=None):
     job['stage_folder']=folder; job['stage_title']=title; job['stage_parameters']=parameters or {}
@@ -468,19 +483,29 @@ def preprocess(job,c,quality_only=False):
     export_artifact(job,c,'rooted-tree.qza','exports/phylogeny')
     finish_stage(job,{'input_asv_count':table_summary(artifact_path(run,'exported-table/feature-table.tsv'))['asv_count']},['使用过滤后的代表序列构建系统发育树，供 Faith PD 和 UniFrac 使用。'])
     depth_counts=totals(run)
-    curve_depth=int(c['max_depth']) if c.get('max_depth','').strip() else int(max(depth_counts.values()))
+    curve_depth=integer(c,'max_depth',2,100000000) if c.get('max_depth','').strip() else int(max(depth_counts.values()))
     if curve_depth<2: raise ValueError('过滤后序列数不足，无法生成抽平曲线')
     saved['effective_curve_max_depth']=curve_depth
     (run/'parameters.json').write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf8')
     begin_stage(job,'06_rarefaction','多深度抽平曲线',{'max_depth':curve_depth,'source':'filtered unrarefied table','metrics':['shannon','observed_features','faith_pd']})
     q(job,c,'diversity','alpha-rarefaction','--i-table','filtered-table.qza','--i-phylogeny','rooted-tree.qza','--m-metadata-file','metadata.tsv','--p-max-depth',curve_depth,'--p-metrics','shannon','observed_features','faith_pd','--o-visualization','alpha-rarefaction.qzv')
-    finish_stage(job,{'sample_depths':depth_counts,'max_depth':curve_depth},['此处只生成多个深度的诊断曲线，原始过滤后特征表不被覆盖。','正式抽平深度须结合曲线平台与各组样本保留情况选择，不按显著性选择。'])
+    export_artifact(job,c,'alpha-rarefaction.qzv','exported-rarefaction')
+    depth_advice=depth_advice_for_run(run)
+    (run/'depth_recommendation.json').write_text(json.dumps(depth_advice,ensure_ascii=False,indent=2),encoding='utf8')
+    job.setdefault('result',{})['depth_advice']=depth_advice
+    finish_stage(job,{'sample_depths':depth_counts,'max_depth':curve_depth,'depth_advice':depth_advice},['此处只生成多个深度的诊断曲线，原始过滤后特征表不被覆盖。','正式抽平深度推荐使用实际曲线与各组留样数，不读取P值；可人工修改。','平台变化阈值与90%留样是保守启发式，不是官方唯一最佳深度。'])
     inventory(run)
     (run/'preprocess_complete.json').write_text(json.dumps({'completed_at':time.time()}))
     job['step']='预处理完成；查看曲线和样本深度后选择抽平深度'
 
 def totals(run):
     return table_summary(artifact_path(run,'exported-table/feature-table.tsv'))['per_sample']
+
+def depth_advice_for_run(run):
+    run=approved_run(run)
+    config=json.loads((run/'parameters.json').read_text(encoding='utf8'))
+    curves=read_curves(artifact_path(run,'exported-rarefaction'),artifact_path(run,'alpha-rarefaction.qzv'))
+    return recommend_depth(config['samples'],totals(run),curves)
 
 def retention(run,depth):
     c=json.loads((run/'parameters.json').read_text(encoding='utf8')); counts=totals(run)
@@ -640,6 +665,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send({'path':str(directory),'parent':str(directory.parent),'entries':entries,'limited':len(entries)==2000})
             elif u.path=='/api/results': self.send(result_files(path(p['run'][0])))
             elif u.path=='/api/quality-advice': self.send(quality_advice_for_run(p['run'][0],p.get('amplicon',[None])[0]))
+            elif u.path=='/api/depth-advice': self.send(depth_advice_for_run(p['run'][0]))
             elif u.path=='/api/file':
                 filename=approved_file(p['path'][0]); size=filename.stat().st_size
                 self.send_response(200)
@@ -649,7 +675,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Content-Security-Policy',"default-src 'none'; sandbox")
                 self.send_header('X-Content-Type-Options','nosniff'); self.end_headers()
                 with filename.open('rb') as f: shutil.copyfileobj(f,self.wfile,1024*1024)
-            elif u.path=='/api/retention': self.send(retention(path(p['run'][0]),int(p['depth'][0])))
+            elif u.path=='/api/retention': self.send(retention(path(p['run'][0]),integer({'depth':p.get('depth',[''])[0]},'depth',1,100000000)))
             else: self.send({'error':'Not found'},404)
         except Exception as e: self.send({'error':str(e)},400)
     def do_POST(self):

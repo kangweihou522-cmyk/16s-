@@ -18,6 +18,7 @@ PREPROCESS = {
     **{name: '05_phylogeny/' + name for name in ('aligned.qza', 'masked.qza', 'unrooted-tree.qza', 'rooted-tree.qza')},
     'exports/phylogeny': '05_phylogeny/exported_tree',
     'alpha-rarefaction.qzv': '06_rarefaction/alpha-rarefaction.qzv',
+    'exported-rarefaction': '06_rarefaction/curve_data',
 }
 DIVERSITY = {
     'metadata.tsv': '00_inputs/metadata.tsv', 'retention.json': '00_inputs/retention.json',
@@ -52,7 +53,7 @@ def artifact_path(run, logical):
 
 
 def mapped_argument(run, value):
-    """Only rewrite known relative output paths, never classifier/input paths."""
+    """Map a path-option value; callers must leave actions and scalar values alone."""
     value = str(value)
     if value.startswith('-') or Path(value).is_absolute():
         return value

@@ -41,6 +41,9 @@ def materialize_qiime_outputs(job, config, *args):
                     writer.writerow([key, *([number] * 300)])
     elif source == 'dada2-stats.qza':
         (destination / 'stats.tsv').write_text('sample-id\tinput\tfiltered\tdenoised\tmerged\tnon-chimeric\n#q2:types\tnumeric\tnumeric\tnumeric\tnumeric\tnumeric\n' + ''.join(f'{sid}\t1000\t950\t900\t800\t{125*(i+1)}\n' for i, sid in enumerate(ids)), encoding='utf8')
+    elif source == 'alpha-rarefaction.qzv':
+        for metric,value in [('observed_features',1),('shannon',0),('faith_pd',0)]:
+            (destination/(metric+'.csv')).write_text('sample-id,depth-10_iter-1,depth-50_iter-1,depth-100_iter-1,Group\n'+''.join(f'{sample["SampleID"]},{value},{value},{value},{sample["Group"]}\n' for sample in samples),encoding='utf8')
 
 
 class QualityPipelineTests(unittest.TestCase):

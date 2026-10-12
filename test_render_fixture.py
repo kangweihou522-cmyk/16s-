@@ -16,6 +16,7 @@ ORDER=['008','003','001','006','002','007','004','005']
 COORDS={'001':(-2.0,-1.0),'002':(-1.0,0.0),'003':(-1.5,1.0),'004':(-2.5,.5),'005':(1.0,-1.0),'006':(2.0,.2),'007':(1.8,1.2),'008':(2.7,.7)}
 METRICS=['weighted_unifrac','unweighted_unifrac','bray_curtis','jaccard']
 ALPHA=['observed_features','shannon','evenness','faith_pd','chao1','simpson','goods_coverage']
+ALPHA_LABELS=['Observed features','Shannon diversity','Pielou evenness','Faith phylogenetic diversity','Chao1 richness','Simpson diversity',"Good's coverage"]
 
 def write(path,text):
  path.parent.mkdir(parents=True,exist_ok=True);path.write_text(text,encoding='utf-8')
@@ -85,13 +86,30 @@ def validate_positive(run,original,out=None):
  annotations=read_csv(out/'alpha/alpha_letters_positions.csv')
  assert all(a['Letter']=='' for a in annotations),'No fabricated alpha annotations'
  alpha=read_csv(out/'alpha/alpha_plot_input.csv');assert set(a['Sample'] for a in alpha)==set(IDS);assert set(a['Metric'] for a in alpha)==set(ALPHA), 'All seven alpha metrics must render'
- stems=['alpha/alpha_diversity','beta/PCoA_four_metrics',*[f'beta/PCoA_{metric}' for metric in METRICS],*[f'taxonomy/{rank}_{kind}_unrarefied' for rank in ['phylum','genus'] for kind in ['sample','group_mean']]]
+ for j,metric in enumerate(ALPHA):
+  points=read_csv(out/'alpha'/f'{metric}_plot_input.csv')
+  assert [p['Sample'] for p in points]==list(reversed(IDS)),f'{metric}: saved sample IDs/order changed'
+  assert all(p['Group']==GROUP[p['Sample']] and p['Metric']==metric and abs(float(p['Value'])-(int(p['Sample'])+j)/10)<1e-12 for p in points),f'{metric}: saved values/group mapping changed'
+  assert points==[p for p in alpha if p['Metric']==metric]
+  letters=read_csv(out/'alpha'/f'{metric}_letters_positions.csv')
+  assert {a['Group'] for a in letters}==set(GROUP.values()) and len(letters)==2
+  assert all(a['Metric']==metric and a['Letter']=='' for a in letters),'No fabricated per-metric alpha annotations'
+  for annotation in letters:
+   expected=max(float(p['Value']) for p in points if p['Group']==annotation['Group'])*1.02
+   assert abs(float(annotation['y'])-expected)<1e-12
+  assert letters==[a for a in annotations if a['Metric']==metric]
+  svg=(out/'alpha'/f'{metric}.svg').read_text()
+  assert ALPHA_LABELS[j] in svg or ALPHA_LABELS[j].replace("'",'&apos;') in svg,f'{metric}: figure label missing'
+ assert not any((out/'alpha'/f'alpha_diversity.{suffix}').exists() for suffix in ['svg','pdf','png']),'Combined alpha panel must not be generated'
+ stems=[*[f'alpha/{metric}' for metric in ALPHA],'beta/PCoA_four_metrics',*[f'beta/PCoA_{metric}' for metric in METRICS],*[f'taxonomy/{rank}_{kind}_unrarefied' for rank in ['phylum','genus'] for kind in ['sample','group_mean']]]
  for stem in stems:
   for suffix in ['svg','pdf','png']:
    path=out/(stem+'.'+suffix);assert path.stat().st_size>500,str(path)
    prefix=path.read_bytes()[:8]
    if suffix=='pdf':assert prefix.startswith(b'%PDF-')
    if suffix=='png':assert prefix==b'\x89PNG\r\n\x1a\n'
+ figures={p.relative_to(out).as_posix() for p in out.rglob('*') if p.suffix in {'.svg','.pdf','.png'}}
+ assert figures=={f'{stem}.{suffix}' for stem in stems for suffix in ['svg','pdf','png']},'Expected exactly 48 named figure files'
  return len(stems)*3
 
 def ord_replace(old,new):
