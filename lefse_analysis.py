@@ -253,13 +253,19 @@ except importlib.metadata.PackageNotFoundError: version='unknown'
 print('LEFSE_RUNTIME='+json.dumps({'prefix':sys.prefix,'python':sys.executable,'version':version,'paths':paths}))
 """
     proc = api.probe(job, _prefix(config, api) + ['python', '-c', code, json.dumps({op: CLI_NAMES[op] for op in operations})], 90)
+    install_hint = ('请在 Ubuntu 的工作站源码目录执行：WORKSTATION_LEFSE_ENV='
+                    + config['lefse_env'] + ' bash install_lefse.sh')
     lines = [line[len('LEFSE_RUNTIME='):] for line in proc.stdout.splitlines() if line.startswith('LEFSE_RUNTIME=')]
     if proc.returncode or len(lines) != 1:
-        raise ValueError('无法检查已安装的 LEfSe 环境：' + (proc.stderr or proc.stdout)[-1500:])
+        raise ValueError('无法检查已安装的 LEfSe 环境：' + (proc.stderr or proc.stdout)[-1500:]
+                         + '\n' + install_hint)
     runtime = json.loads(lines[0])
     missing = [op for op in operations if not runtime['paths'].get(op)]
     if missing:
-        raise ValueError('LEfSe 环境缺少官方命令：' + ', '.join(CLI_NAMES[op][0] for op in missing))
+        raise ValueError('LEfSe 环境缺少官方命令：' + ', '.join(CLI_NAMES[op][0] for op in missing)
+                         + '\n检测环境：' + str(runtime.get('prefix', 'unknown'))
+                         + '；LEfSe版本：' + str(runtime.get('version', 'unknown'))
+                         + '\n' + install_hint)
     return runtime
 
 

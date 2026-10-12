@@ -202,6 +202,8 @@ QIIME 2 ANCOM在计数表上加官方伪计数后运行composition ancom，输�
 
 ### LEfSe与LDA阈值预览
 
+环境名存在不代表已经安装LEfSe。首次使用或提示缺少官方命令时，在Ubuntu的工作站源码目录执行 `bash install_lefse.sh`。它在已有 `lefse` 环境安装官方Bioconda LEfSe 1.1.2；环境不存在时创建，再检查四个命令的 `-h` 和实际加载R统计依赖。自定义环境名用 `WORKSTATION_LEFSE_ENV=环境名 bash install_lefse.sh`，网页填写同一名称。安装不涉及QIIME或绘图R环境；不删除原分析结果。网络或包求解失败时脚本明确停止。
+
 选择本机 `lefse` 环境，使用未抽平ASV表构建L2–L7完整谱系；按每样本ASV总数转换成CPM一次，官方formatter关闭再次归一化。不同父分类的同名菌保持分开。未知末级分类、norank/uncultured/unclassified/Incertae_Sedis等在对应层级记录为Others，不作为候选标志菌；已注释的下级分类仍保留，未知中间分支采用可逆的上下文编码，其本身不检验。保存输入、名称映射、未知分类处理和实际测试特征数。
 
 默认KW/一致性阈值0.05、one-against-all多组策略；可选较严格all-against-all。只有SampleID与Group，不假定配对或subclass。官方LEfSe在每类少于10样本时的一致性步骤采用中位数规则，阶段说明记录这一行为。拟合以LDA截断0保留已计算的正得分，然后按用户阈值筛选；默认显示LDA>2。

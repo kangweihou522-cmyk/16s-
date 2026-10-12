@@ -20,7 +20,7 @@ CAP1,LDC,CAP1.raw_1.fastq,CAP1.raw_2.fastq
 <div><label for="diff_alpha">显著性阈值（ANCOM-BC2）</label><input id="diff_alpha" type="number" min="0.0001" max="0.99" step="0.01" value="0.05"></div>
 <div><label for="diff_prevalence">ANCOM-BC2 最低出现比例</label><input id="diff_prevalence" type="number" min="0" max="1" step="0.01" value="0.1"></div>
 </div><p><button id="differential" onclick="run('differential')">运行 L2–L6 差异菌分析</button></p>
-<h3>LEfSe 标志微生物</h3><div class="grid">
+<h3>LEfSe 标志微生物</h3><p class="help">首次使用或缺少官方命令时，在 Ubuntu 的工作站源码目录执行 bash install_lefse.sh，安装到 lefse 环境并检查四个命令及 R 统计依赖。其他环境名可用 WORKSTATION_LEFSE_ENV=环境名 bash install_lefse.sh。</p><div class="grid">
 <div><label for="lefse_env">LEfSe conda 环境</label><input id="lefse_env" value="lefse"></div>
 <div><label for="lda_threshold">LDA 得分阈值（可在分析后修改）</label><input id="lda_threshold" type="number" min="0" step="0.1" value="2"></div>
 <div><label for="kw_alpha">Kruskal–Wallis 阈值</label><input id="kw_alpha" type="number" min="0.0001" max="0.99" step="0.01" value="0.05"></div>
