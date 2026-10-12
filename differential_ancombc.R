@@ -205,7 +205,7 @@ main <- function() {
                          missing_values = 'NA is preserved in all exported result tables',
                          primary_tests = 'Nonreference nominal Group levels versus explicit reference',
                          global = opts$global, pairwise = opts$pairwise,
-                         pairwise_adjustment = 'Official ANCOM-BC2 mixed directional FDR with Holm FWER control and B=100',
+                         pairwise_adjustment = 'Official ANCOM-BC2 mixed directional FDR with global screen and Holm within-taxon control',
                          structural_zeros = 'Reported separately by official zero_ind; no artificial finite p/q values',
                          feature_count = nrow(counts), modeled_features = length(fit_taxa), plots = plots)
     jsonlite::write_json(diagnostics, file.path(folder, 'diagnostics.json'), pretty = TRUE, auto_unbox = TRUE)
