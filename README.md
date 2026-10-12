@@ -1,4 +1,4 @@
-# Windows / WSL 16S 本地分析工作站 v0.2
+# Windows / WSL 16S 本地分析工作站 v0.3
 
 浏览器操作，WSL Ubuntu 中使用你自己安装的 **QIIME 2 和 R** 计算。原始测序数据只读，每次生成独立结果目录；分类器由用户选择本地 `.qza` 文件。程序不调用任何 AI API，不需保持 ChatGPT/Codex 会话运行。
 
@@ -27,7 +27,7 @@ Windows 双击入口 `启动工作站.bat` 针对你已安装的 `Ubuntu-24.04`�
 ## 软件与分类器
 
 - 界面和文件检查：Python 3 标准库，无需 Node.js、Shiny 或第三方 Python 包。
-- 分析：WSL 内已有 QIIME 2 amplicon conda 环境，含 dada2、cutadapt、feature-classifier、phylogeny、diversity、taxa、feature-table 等插件。
+- 分析：以用户已安装的 `qiime2-amplicon-2025.7` 为参数依据，WSL 内需有 dada2、cutadapt、feature-classifier、phylogeny、diversity、taxa、feature-table 等插件。其他版本先核对是否支持 `--p-max-merge-mismatch`。
 - 分类器：在网页选择你自己的兼容 `.qza`。程序不下载、不替换分类器。`tools peek` 可以查看类型，但完整 sklearn/区域兼容性需实际分类时核验。
 - 绘图：独立 conda 环境 `16s-workstation-r`，固定 R 4.4 并一次安装 ggplot2、patchwork、svglite、xml2、jsonlite、systemfonts、multcompView、MASS 的兼容二进制包。与QIIME环境分开，也不调用Windows R/RStudio。网页中的“绘图专用R环境名”默认为该环境。
 - 选择你已安装的 QIIME 环境名。`conda env list` 可查看；环境检查会报告名称、插件、R依赖和分类器情况。没有选择环境也能返回发现结果。不同 QIIME 版本可能改变命令或文件布局，不能仅凭名称认定兼容。
@@ -86,10 +86,20 @@ CAP2,LDC
 ## 分阶段运行
 
 1. **输入和环境检查**：选择原始目录、分组CSV、输出根目录（允许原始目录下新建 results 子目录），确认配对和软件依赖。可以输入 Windows 路径或 `/mnt/d/...`，支持中文目录。
-2. **引物与质量**：前1000条 reads 的开头匹配常见338F/341F/806R（考虑简并碱基、偏移和1错配）。338F/341F有共有序列，未匹配不能证明已去除。用户确认已去引物、选择候选组合或输入真实序列后，生成 `demux.qzv` / `trimmed.qzv`。cutadapt 模式丢弃未匹配引物的 reads，数量保留在日志。
-3. **预处理**：依据质量图填写DADA2截断/trim参数；双端还需填写进入DADA2的预计扩增子长度，用于核对至少12bp重叠。去引物时填去除两条引物后的扩增子长度，不是250/300bp测序read长度。继续预处理会复用已经检查的导入数据；改变输入文件或元数据会阻止旧结果复用。
+2. **引物与质量**：前1000条 reads 的开头匹配常见338F/341F/806R（考虑简并碱基、偏移和1错配）。338F/341F有共有序列，未匹配不能证明已去除。用户确认已去引物、选择候选组合或输入真实序列后，生成 `demux.qzv` / `trimmed.qzv`，并导出各阶段的 `per-sample-fastq-counts.tsv`、`forward-seven-number-summaries.tsv` 和双端 reverse 表。cutadapt 使用0.1错误率、至少较短引物长度的匹配，丢弃未匹配引物的 reads；报告保留前后各样本数量。
+3. **预处理**：默认从进入DADA2的数据质量表自动推荐截断、trim、线程、最低丰度；支持切换手动，手动修改会被保留。预计扩增子长度改为可选：有可靠的去引物后长度时提前核对至少12bp重叠，未知时不编造长度，DADA2仍按实际序列检查拼接。它不是250/300bp测序read长度。继续预处理复用已经检查的导入数据；改变输入文件或元数据会阻止旧结果复用。旧版质量目录可点击“从已有质量结果导出表格并推荐参数”，不重新导入或运行DADA2。
 4. **抽平和多样性**：曲线最大深度可留空，按过滤后最大样本总量生成并记录实际值。结合曲线和样本深度，选择正式抽平深度；界面显示每组将保留/丢弃的样本。每次核心分析只抽平一次，之后指标、统计及R图使用本次保存数据。
-5. **查看结果**：界面列出结果文件，支持筛选、下载和SVG/PDF/PNG预览。QZV可在QIIME 2 View中查看；该查看器需联网，本工作站不内置完整QZV查看器。
+5. **查看结果**：界面按阶段折叠显示，支持筛选、下载和SVG/PDF/PNG预览；各步生成 `说明.md` / `report.json`，可预览说明和TSV/CSV/JSON。输入检查与环境检查在已选择的输出根目录保存独立check目录。QZV可在QIIME 2 View中查看；该查看器需联网，本工作站不内置完整QZV查看器。
+
+## 质控依据与自动参数
+
+用户提供的Q20/10bp滑窗、10bp overlap、20%拼接错配、USEARCH/gold是另一套处理流程；本工作站采用DADA2 ASV流程。按照QIIME 2 2025.7官方实现，明确使用正反向预期错误数上限2、`trunc_q=2`、最小重叠12bp、最大拼接错配0、`chimera_method=consensus`。DADA2在降噪后拼接、检测并去除嵌合体，原流程的默认值已有去嵌合体；新版将设置和实际统计明确保存，不额外叠加USEARCH或gold数据库。输入须是已拆分到样本的FASTQ，CSV关联样本与文件，不在这里重新按barcode拆样；需要原始barcode拆样的数据应先完成相应步骤。
+
+自动截断是透明的保守启发式，**不是官方固定最优值**：每端先取至少99%抽样reads能覆盖的最长位置，再在第一个连续10个位置的Q25中位数低于Q30的窗口前截断。这个窗口只用于评估汇总质量图，不对每条read执行滑窗修剪。推荐长度不足50bp时要求人工判断，50bp只是自动推荐的适用范围，不是新增的DADA2通用过滤标准。记录抽样数、长度覆盖上限、质量窗口、选定截断和重叠检查；抽样长度覆盖比例不能当成实际质控保留率。
+
+引物处理确认后，额外trim默认0；线程推荐不超过可用CPU的4线程；ASV全表最低丰度默认1，避免额外删除低丰度ASV影响丰富度与Chao1，手动可提高。曲线最大深度留空时仍由过滤后最大样本计数确定；正式抽平深度须结合曲线和各组样本保留情况选择。质量汇总无法推断真实扩增子长度、引物是否已去除或每条read的预期错误数。参数效果以各样本DADA2的filtered、merged、non-chimeric统计核验。
+
+官方依据：[DADA2 2025.7参数及默认值](https://github.com/qiime2/q2-dada2/blob/2025.7.0/q2_dada2/_denoise.py)、[参数含义](https://github.com/qiime2/q2-dada2/blob/2025.7.0/q2_dada2/plugin_setup.py)、[质量统计与TSV导出](https://github.com/qiime2/q2-demux/blob/2025.7.0/q2_demux/_summarize/_visualizer.py)。
 
 正式分组检验至少要求每组保留2个样本，且不允许某组因抽平全部丢失。该运行检查不替代研究设计。已拼接 reads 不能自动还原成双端。
 
@@ -99,7 +109,7 @@ CAP2,LDC
 
 - 导入、质量概览、可选cutadapt、DADA2表/代表序列/降噪统计。
 - 用户分类器sklearn分类和分类结果可视化。
-- 排除 Archaea、mitochondria、chloroplast，ASV全表最低总丰度默认10；过滤序列、分类堆积图、MAFFT/FastTree树。阈值和排除项依研究目标还可调整。
+- 排除 Archaea、mitochondria、chloroplast，ASV全表最低总丰度默认1；过滤序列、分类堆积图、MAFFT/FastTree树。最低丰度可在网页修改；当前排除项固定，若研究包含古菌需另行调整。
 - 抽平曲线（Shannon、observed features、Faith PD）；核心抽平表。
 - 七项α：observed features、Shannon、evenness、Faith PD、Chao1、Simpson、Good’s coverage；QIIME总体/两两KW和保存的BH q值。
 - 四项β：weighted/unweighted UniFrac、Bray-Curtis、Jaccard，保存距离、PCoA、Emperor及总体/两两PERMANOVA与PERMDISP。
@@ -118,14 +128,24 @@ CAP2,LDC
 
 ```text
 输出根目录/run_<时间>_<编号>/
-  QIIME预处理QZA/QZV、导出表、manifest、metadata、参数、日志
-  diversity_<深度>_<编号>/
-    core-metrics-results/   抽平表、指标、距离、PCoA、Emperor
-    alpha/ beta/            分组检验QZV
-    exports/                标准导出数据和统计可视化
-    R_original_style/       SVG、PDF、PNG、CSV、R版本
-    statistics_status.json  已执行/跳过/未完成状态
+  00_inputs/              manifest、metadata、输入说明
+  01_import/              demux QZA/QZV、原始质量统计表
+  02_primers/             去引物 QZA/QZV、处理后质量统计表
+  03_dada2/               ASV、代表序列、去嵌合体统计与完整ASV表
+  04_taxonomy_filter/     分类、过滤后表、代表序列、分类堆积图
+  05_phylogeny/           比对、掩蔽、树及树导出
+  06_rarefaction/         多深度抽平曲线
+  08_parameter_advice/    自动推荐依据
+  07_diversity/diversity_<深度>_<编号>/
+    00_inputs/            本次保留样本分组与retention
+    01_core_metrics/      本次抽平表、指标、距离、PCoA、Emperor
+    02_exports/           抽平TSV、指标、坐标及统计导出
+    03_statistics/        分组检验QZV及执行/跳过状态
+    04_R_figures/         按alpha/beta/taxonomy分组的SVG/PDF/PNG/CSV
+  处理说明.md、参数、布局映射、运行状态、日志
 ```
+
+每个阶段目录都有 `说明.md` 和 `report.json`，记录参数、实际数量、保存文件和完成/跳过/失败状态。旧版已有结果保留原位置，新程序通过有版本号的布局映射兼容读取；不搬动或覆盖旧分析。
 
 本版本不是任意步骤断点恢复工具：质量阶段可继续到预处理，完成预处理可创建多次不同深度分析；失败的部分结果不直接重用。重启网页后台后原文件保留，内存任务状态丢失；使用历史结果目录查看文件或开始下一阶段。
 

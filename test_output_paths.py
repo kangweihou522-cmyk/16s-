@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_mapping import fastq
+from test_quality_pipeline import materialize_qiime_outputs
 
 SPEC = importlib.util.spec_from_file_location("output_workstation", Path(__file__).with_name("app.py"))
 app = importlib.util.module_from_spec(SPEC)
@@ -51,7 +52,7 @@ class OutputDirectoryTests(unittest.TestCase):
         originals = self.original_files()
         config = self.config(output)
         jobs = [{}, {}]
-        with patch.object(app, "q"), patch.object(app, "command"):
+        with patch.object(app, "q", side_effect=materialize_qiime_outputs), patch.object(app, "command"):
             for job in jobs:
                 app.preprocess(job, config, quality_only=True)
         runs = [Path(job["run"]) for job in jobs]
@@ -60,7 +61,7 @@ class OutputDirectoryTests(unittest.TestCase):
             self.assertEqual(run.parent, output)
             self.assertTrue(run.name.startswith("run_"))
             self.assertTrue((run / "quality_complete.json").is_file())
-            with (run / "manifest.tsv").open(encoding="utf8") as stream:
+            with app.artifact_path(run, "manifest.tsv").open(encoding="utf8") as stream:
                 rows = list(csv.reader(stream, delimiter="\t"))
             self.assertEqual(rows[1], ["A1", str(forward), str(reverse)])
         # Automatic discovery still inspects only raw-folder files even after
@@ -79,15 +80,15 @@ class OutputDirectoryTests(unittest.TestCase):
         output = self.raw / "analysis" / "results"
         originals = self.original_files()
         job = {}
-        with patch.object(app, "q"), patch.object(app, "command"):
+        with patch.object(app, "q", side_effect=materialize_qiime_outputs), patch.object(app, "command"):
             app.preprocess(job, self.config(output), quality_only=True)
         run = Path(job["run"])
         self.assertEqual(run.parent, output)
         self.assertTrue((run / "quality_complete.json").is_file())
-        with (run / "manifest.tsv").open(encoding="utf8") as stream:
+        with app.artifact_path(run, "manifest.tsv").open(encoding="utf8") as stream:
             rows = list(csv.reader(stream, delimiter="\t"))
         self.assertEqual(rows[1], ["CAP1", str(forward), str(reverse)])
-        with (run / "metadata.tsv").open(encoding="utf8") as stream:
+        with app.artifact_path(run, "metadata.tsv").open(encoding="utf8") as stream:
             groups = list(csv.reader(stream, delimiter="\t"))
         self.assertEqual(groups[-1], ["CAP1", "处理"])
         self.assert_originals_preserved(originals)

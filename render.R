@@ -12,7 +12,18 @@ if (length(missing)) stop('Missing R packages: ',paste(missing,collapse=', '))
 if (!font %in% c('serif','sans','mono') && !font %in% systemfonts::system_fonts()$family)
   stop('Font not installed: ',font,'. Select an installed font in the workstation.')
 if (!capabilities('cairo')) stop('R needs Cairo graphics support for reliable PDF/PNG output.')
-out <- file.path(run,'R_original_style'); dir.create(out,recursive=TRUE,showWarnings=FALSE)
+result_path <- function(base,...) {
+  logical <- file.path(...); layout_file <- file.path(base,'layout.json')
+  if (file.exists(layout_file)) {
+    mapping <- jsonlite::read_json(layout_file)$paths
+    keys <- names(mapping)[order(nchar(names(mapping)),decreasing=TRUE)]
+    for (key in keys) if (logical==key || startsWith(logical,paste0(key,'/'))) {
+      logical <- paste0(mapping[[key]],substring(logical,nchar(key)+1)); break
+    }
+  }
+  file.path(base,logical)
+}
+out <- result_path(run,'R_original_style'); dir.create(out,recursive=TRUE,showWarnings=FALSE)
 notes <- character()
 note <- function(x) { notes <<- c(notes,x); message(x) }
 csv <- function(d,f) {
@@ -27,7 +38,7 @@ tab <- function(f,metadata=FALSE) {
   if (metadata) x <- c(x[1],x[-1][!grepl('^\\s*#',x[-1])])
   utils::read.delim(text=paste(x,collapse='\n'),check.names=FALSE,colClasses='character',quote='',comment.char='',na.strings='')
 }
-md <- tab(file.path(run,'metadata.tsv'),TRUE); names(md)[1] <- 'SampleID'
+md <- tab(result_path(run,'metadata.tsv'),TRUE); names(md)[1] <- 'SampleID'
 if (!'Group' %in% names(md) || anyNA(md[c('SampleID','Group')]) || anyDuplicated(md$SampleID) || any(!nzchar(md$SampleID)) || any(!nzchar(md$Group))) stop('Invalid SampleID/Group metadata.')
 groups <- unique(md$Group); colors <- c(CON='#D55E00',LDC='#0072B2',HDC='#CC79A7')
 extra <- setdiff(groups,names(colors))
@@ -49,7 +60,7 @@ theme_base <- function() ggplot2::theme_minimal(base_size=14,base_family=font)+
   ggplot2::theme(panel.grid=ggplot2::element_blank(),panel.border=ggplot2::element_rect(color='black',fill=NA),axis.text=ggplot2::element_text(face='bold'),axis.title=ggplot2::element_text(face='bold'),strip.background=ggplot2::element_rect(fill='gray80',color='black'))
 alpha <- list(); annotations <- list(); overall <- list(); pairwise <- list(); alpha_ids <- NULL
 for (metric in c('observed_features','shannon','evenness','faith_pd','chao1','simpson','goods_coverage')) {
-  f <- file.path(run,'exports','alpha',metric,'alpha-diversity.tsv')
+  f <- result_path(run,'exports','alpha',metric,'alpha-diversity.tsv')
   if (!file.exists(f)) { note(paste('Alpha export missing:',metric)); next }
   v <- tab(f); if (ncol(v)!=2) stop('Invalid alpha vector: ',f)
   d <- match_md(v[[1]])
@@ -58,7 +69,7 @@ for (metric in c('observed_features','shannon','evenness','faith_pd','chao1','si
   d <- data.frame(Sample=d$SampleID,Group=d$Group,Metric=metric,Value=as.numeric(v[[2]]))
   if (any(!is.finite(d$Value)) || any(d$Value<0)) stop('Invalid alpha values: ',metric)
   alpha[[metric]] <- d; an <- data.frame(Metric=metric,Group=levels(d$Group),Letter='')
-  sf <- file.path(run,'alpha',paste0(metric,'-group-significance.qzv'))
+  sf <- result_path(run,'alpha',paste0(metric,'-group-significance.qzv'))
   if (!file.exists(sf)) note(paste(metric,': no saved alpha group test; significance letters omitted.'))
   if (original && file.exists(sf) && nlevels(d$Group)>=2) {
     stat <- tryCatch(q2_read_alpha_stats(sf,metric,d),error=function(e) { note(paste(metric,'saved alpha tests not annotated:',e$message)); NULL })
@@ -114,13 +125,13 @@ read_dm <- function(f,ids) {
 titles <- c(weighted_unifrac='Weighted UniFrac',unweighted_unifrac='Unweighted UniFrac',bray_curtis='Bray-Curtis',jaccard='Jaccard')
 plots <- list(); beta_stats <- list(); beta_ids <- NULL
 for (metric in names(titles)) {
-  f <- file.path(run,'exports','pcoa',metric,'ordination.txt')
+  f <- result_path(run,'exports','pcoa',metric,'ordination.txt')
   if (!file.exists(f)) { note(paste('PCoA export missing:',metric)); next }
   ord <- read_ord(f); d <- match_md(ord$ids)
   if (!is.null(beta_ids) && !setequal(beta_ids,ord$ids)) stop('PCoA metrics have different sample sets.')
-  beta_ids <- ord$ids; dm <- read_dm(file.path(run,'exports','distance',metric,'distance-matrix.tsv'),ord$ids); saved_p <- NULL
+  beta_ids <- ord$ids; dm <- read_dm(result_path(run,'exports','distance',metric,'distance-matrix.tsv'),ord$ids); saved_p <- NULL
   for (method in c('permanova','permdisp')) {
-    sf <- file.path(run,'beta',paste0(metric,'-',method,'.qzv'))
+    sf <- result_path(run,'beta',paste0(metric,'-',method,'.qzv'))
     if (!file.exists(sf)) note(paste(metric,method,': no saved test; annotation omitted.'))
     if (!original || !file.exists(sf) || nlevels(d$Group)<2) next
     stat <- tryCatch(q2_read_qiime_stats(sf,method,dm,d),error=function(e) { note(paste(metric,method,'not annotated:',e$message)); NULL })
@@ -143,7 +154,7 @@ for (metric in names(titles)) {
 if (length(plots)) save_plot(patchwork::wrap_plots(plots,ncol=2),'beta/PCoA_four_metrics',12,5*ceiling(length(plots)/2))
 if (length(beta_stats)) csv(do.call(rbind,beta_stats),file.path(out,'beta','beta_QIIME_overall_saved.csv'))
 # Composition uses filtered UNRAREFIED counts and each sample's relative abundance.
-tf <- file.path(parent,'exported-table','feature-table.tsv'); tx <- file.path(parent,'exported-taxonomy','taxonomy.tsv')
+tf <- result_path(parent,'exported-table','feature-table.tsv'); tx <- result_path(parent,'exported-taxonomy','taxonomy.tsv')
 if (file.exists(tf) && file.exists(tx)) {
   lines <- readLines(tf,warn=FALSE,encoding='UTF-8'); h <- which(grepl('^(#OTU ID|#?Feature ID|#?feature-id)\t',lines))
   if (length(h)!=1) stop('Cannot find BIOM TSV header.')
@@ -152,7 +163,7 @@ if (file.exists(tf) && file.exists(tx)) {
   if (!'Taxon' %in% names(tax) || anyDuplicated(tax$FeatureID) || anyDuplicated(tbl[[1]])) stop('Invalid taxonomy/table feature IDs.')
   counts <- as.matrix(tbl[-1]); storage.mode(counts) <- 'double'
   if (any(!is.finite(counts)) || any(counts<0)) stop('Invalid feature counts.')
-  pmd <- tab(file.path(parent,'metadata.tsv'),TRUE); names(pmd)[1] <- 'SampleID'
+  pmd <- tab(result_path(parent,'metadata.tsv'),TRUE); names(pmd)[1] <- 'SampleID'
   if (!'Group' %in% names(pmd) || anyDuplicated(pmd$SampleID) || !all(colnames(counts) %in% pmd$SampleID)) stop('Taxonomy metadata mismatch.')
   pmd <- pmd[match(colnames(counts),pmd$SampleID),,drop=FALSE]
   if (anyNA(pmd$Group) || any(!nzchar(pmd$Group))) stop('Taxonomy groups missing.')

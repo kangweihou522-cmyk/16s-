@@ -27,6 +27,9 @@ def fastq(p, ids=("read01", "read02"), sequence="ACGT" * 30, mate=None):
         p.write_text(content, encoding="ascii")
 
 
+from test_quality_pipeline import materialize_qiime_outputs
+
+
 class BackendTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -57,6 +60,10 @@ class BackendTests(unittest.TestCase):
             trim_f="0", trim_r="0", amplicon="460", primer_mode="338F",
             classifier=str(classifier), font="DejaVu Sans", env="fake-qiime",
             r_env="custom-r-plotting", conda="/fake/conda")
+
+    def record_q(self, calls, job, config, *args):
+        calls.append(args)
+        materialize_qiime_outputs(job, config, *args)
 
     def mock_biom_conversion(self, job, args, cwd=None, process_env=None):
         """Materialize only synthetic TSV counts needed by downstream checks."""
@@ -253,11 +260,11 @@ class BackendTests(unittest.TestCase):
             command_args.append(args)
             command_envs.append(process_env)
             self.mock_biom_conversion(job, args, cwd)
-        with patch.object(app, "q", side_effect=lambda job, c, *args: qiime_args.append(args)), \
+        with patch.object(app, "q", side_effect=lambda job, c, *args: self.record_q(qiime_args, job, c, *args)), \
              patch.object(app, "command", side_effect=fake_command):
             app.preprocess(job, config)
         run = Path(job["run"])
-        with (run / "manifest.tsv").open(encoding="utf8") as f:
+        with app.artifact_path(run, "manifest.tsv").open(encoding="utf8") as f:
             manifest = list(csv.reader(f, delimiter="\t"))
         self.assertEqual(manifest[0], ["sample-id", "forward-absolute-filepath", "reverse-absolute-filepath"])
         self.assertEqual(manifest[1][0], "0001")
@@ -286,7 +293,7 @@ class BackendTests(unittest.TestCase):
         self.pair("0002")
         config = self.processing_config() | {"max_depth": ""}
         job, calls = {}, []
-        with patch.object(app, "q", side_effect=lambda job, c, *args: calls.append(args)), \
+        with patch.object(app, "q", side_effect=lambda job, c, *args: self.record_q(calls, job, c, *args)), \
              patch.object(app, "command", side_effect=self.mock_biom_conversion):
             app.preprocess(job, config)
         run = Path(job["run"])
@@ -302,7 +309,7 @@ class BackendTests(unittest.TestCase):
         for k in ("trunc_f", "trunc_r", "trim_f", "trim_r", "amplicon", "classifier"):
             del config[k]
         job, calls = {}, []
-        with patch.object(app, "q", side_effect=lambda job, c, *args: calls.append(args)), \
+        with patch.object(app, "q", side_effect=lambda job, c, *args: self.record_q(calls, job, c, *args)), \
              patch.object(app, "command"):
             app.preprocess(job, config, quality_only=True)
         run = Path(job["run"])
@@ -316,7 +323,7 @@ class BackendTests(unittest.TestCase):
         self.metadata([("0001", "A")])
         self.pair("0001")
         config, job, calls = self.processing_config(), {}, []
-        with patch.object(app, "q", side_effect=lambda job, c, *args: calls.append(args)), \
+        with patch.object(app, "q", side_effect=lambda job, c, *args: self.record_q(calls, job, c, *args)), \
              patch.object(app, "command", side_effect=self.mock_biom_conversion):
             app.preprocess(job, config, quality_only=True)
             config["quality_run"] = job["run"]
@@ -332,7 +339,7 @@ class BackendTests(unittest.TestCase):
         self.metadata([("0001", "A")])
         self.pair("0001")
         config, job = self.processing_config(), {}
-        with patch.object(app, "q"), patch.object(app, "command"):
+        with patch.object(app, "q", side_effect=lambda job,c,*args: self.record_q([],job,c,*args)), patch.object(app, "command"):
             app.preprocess(job, config, quality_only=True)
         config["quality_run"] = job["run"]
         p = self.raw / "0001_R1.fastq.gz"
@@ -390,7 +397,7 @@ class BackendTests(unittest.TestCase):
             events.append(("qiime", tuple(args)))
             run = Path(job["run"])
             if args[:2] == ("diversity", "core-metrics-phylogenetic"):
-                core = run / "core-metrics-results"
+                core = app.artifact_path(run, "core-metrics-results")
                 core.mkdir()
                 names = ["rarefied_table.qza"]
                 names += [f"{m}_vector.qza" for m in
@@ -402,11 +409,11 @@ class BackendTests(unittest.TestCase):
                     (core / name).write_bytes(b"placeholder-for-command-tests")
             for idx, value in enumerate(args[:-1]):
                 if str(value).startswith("--o-"):
-                    output = run / str(args[idx + 1])
+                    output = app.artifact_path(run, str(args[idx + 1]))
                     output.parent.mkdir(parents=True, exist_ok=True)
                     output.write_bytes(b"placeholder-for-command-tests")
             if args[:2] == ("tools", "export"):
-                destination = run / str(args[args.index("--output-path") + 1])
+                destination = app.artifact_path(run, str(args[args.index("--output-path") + 1]))
                 destination.mkdir(parents=True, exist_ok=True)
                 source = str(args[args.index("--input-path") + 1])
                 if "_vector.qza" in source:
@@ -421,6 +428,11 @@ class BackendTests(unittest.TestCase):
             commands.append(args)
             command_envs.append(process_env)
             events.append(("command", tuple(args)))
+            self.mock_biom_conversion(job,args,cwd,process_env)
+            if "Rscript" in args:
+                output=app.artifact_path(Path(job["run"]),"R_original_style")
+                output.mkdir(parents=True,exist_ok=True)
+                (output/"render_summary.json").write_text(json.dumps({"source":"saved_QIIME2_outputs","notes":[]}))
 
         with patch.object(app, "q", side_effect=fake_q), \
              patch.object(app, "command", side_effect=fake_command):
@@ -475,7 +487,7 @@ class BackendTests(unittest.TestCase):
         self.assertNotEqual(first_sub, failed_sub)
         self.assertTrue((failed_sub / "qiime_outputs_complete.json").exists())
         self.assertTrue((failed_sub / "qiime_statistics_complete.json").exists())
-        self.assertTrue((failed_sub / "core-metrics-results" / "rarefied_table.qza").exists())
+        self.assertTrue(app.artifact_path(failed_sub, "core-metrics-results/rarefied_table.qza").exists())
         self.assertFalse((failed_sub / "complete.json").exists())
         self.assertEqual((first_sub / "parameters.json").read_bytes(), first_parameters)
 

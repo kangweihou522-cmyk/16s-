@@ -5,6 +5,8 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 from datetime import datetime, timezone, timedelta
+from run_layout import initialize_layout, artifact_path, mapped_argument, quality_counts, denoising_counts, table_summary, stage_report
+from quality_advice import recommend_parameters
 
 ROOT = Path(__file__).resolve().parent
 
@@ -187,7 +189,17 @@ def command(job,args,cwd=None,process_env=None):
     if code: raise RuntimeError(f'命令退出码 {code}，请查看日志；已生成的结果会保留')
     if job.get('cancel'): raise RuntimeError('用户已停止任务')
 
-def q(job,c,*args): command(job,conda_cmd(c)+['qiime',*args],job['run'])
+def q(job,c,*args):
+    command(job,conda_cmd(c)+['qiime',*(mapped_argument(Path(job['run']), arg) for arg in args)],job['run'])
+
+def begin_stage(job,folder,title,parameters=None):
+    job['stage_folder']=folder; job['stage_title']=title; job['stage_parameters']=parameters or {}
+    job['step']=title
+    stage_report(job['run'],folder,title,status='running',parameters=parameters)
+
+def finish_stage(job,results=None,notes=()):
+    stage_report(job['run'],job['stage_folder'],job['stage_title'],parameters=job.get('stage_parameters'),results=results,notes=notes)
+    job.pop('stage_folder',None); job.pop('stage_title',None); job.pop('stage_parameters',None)
 
 def marker(run):
     (run/'workstation_run.json').write_text(json.dumps({'application':'16S-workstation','format':2}),encoding='utf8')
@@ -262,20 +274,76 @@ def preflight(job,c):
     job['step']='环境检查完成；请按报告处理未通过项（版本兼容性需实际分类时核验）'
 
 def write_metadata(run, rows, filename='metadata.tsv'):
-    with (run/filename).open('w',encoding='utf8',newline='') as f:
+    with artifact_path(run,filename).open('w',encoding='utf8',newline='') as f:
         w=csv.writer(f,delimiter='\t'); w.writerow(['sample-id','Group']); w.writerow(['#q2:types','categorical']); w.writerows(rows)
 
 def check_overlap(c):
     f=integer(c,'trunc_f',1,1000); r=integer(c,'trunc_r',1,1000)
     trimf=integer(c,'trim_f',0,500); trimr=integer(c,'trim_r',0,500)
-    length=integer(c,'amplicon',1,2000)
-    # length must describe sequences entering DADA2 (after cutadapt if enabled).
     if f<=trimf or r<=trimr: raise ValueError('截断位置必须大于左端 trim 长度')
+    if not str(c.get('amplicon','')).strip(): return f,r,trimf,trimr
+    length=integer(c,'amplicon',1,2000)
+    # Unknown biological length stays unknown; actual DADA2 merging enforces overlap.
     overlap=min(f,length-trimr)-max(trimf,length-r)
     if overlap<12: raise ValueError('按填写的扩增子长度计算，两端重叠不足12bp；请调整参数')
     return f,r,trimf,trimr
 
+def export_quality(job,c,visualization,destination):
+    folder=artifact_path(job['run'],destination)
+    if not (folder/'per-sample-fastq-counts.tsv').is_file():
+        export_artifact(job,c,visualization,destination)
+    return quality_counts(folder)
+
+def quality_advice_for_run(run,amplicon=None):
+    run=approved_run(run)
+    saved=json.loads((run/'parameters.json').read_text(encoding='utf8'))
+    logical='quality-raw' if saved['primer_mode']=='removed' else 'quality-trimmed'
+    folder=artifact_path(run,logical)
+    advice=recommend_parameters(folder/'forward-seven-number-summaries.tsv',
+        folder/'reverse-seven-number-summaries.tsv' if saved['mode']=='paired' else None,
+        amplicon=amplicon or None,cpu_count=os.cpu_count())
+    advice['quality_source']=str(folder)
+    advice['primer_mode']=saved['primer_mode']
+    return advice
+
+def save_quality_advice(job,c):
+    try:
+        advice=quality_advice_for_run(job['run'],c.get('amplicon'))
+    except (ValueError,FileNotFoundError) as e:
+        advice={'parameters':{},'evidence':{},'warnings':[str(e)],'requires_review':True,'method':'质量表无法生成可靠推荐，请检查质量输出并手动设置'}
+    (Path(job['run'])/'parameter_recommendation.json').write_text(json.dumps(advice,ensure_ascii=False,indent=2),encoding='utf8')
+    job['result']={'quality_advice':advice}
+    return advice
+
+def refresh_quality_advice(job,c):
+    run=approved_run(c['quality_run'])
+    if not (run/'quality_complete.json').is_file(): raise ValueError('请选择已完成的质量检查目录')
+    saved=json.loads((run/'parameters.json').read_text(encoding='utf8'))
+    job['run']=str(run); job['log']=str(run/'workflow.log')
+    export_quality(job,saved,'demux.qzv','quality-raw')
+    if saved['primer_mode']!='removed': export_quality(job,saved,'trimmed.qzv','quality-trimmed')
+    advice=save_quality_advice(job,c)
+    stage_report(run,'08_parameter_advice','自动参数推荐',results=advice,notes=['此操作只导出已有质量文件并生成推荐，不运行 DADA2。','扩增子长度不能由逐位置质量统计推断；未知时留空。'])
+    job['step']='参数推荐完成；可手动修改，实际保留率需 DADA2 输出核验'
+
+def save_check_results(job,c,action):
+    if not c.get('output','').strip(): return
+    out=path(c['output'])
+    if c.get('input','').strip():
+        raw=path(c['input'])
+        if out==raw or out in raw.parents: raise ValueError('检查结果目录不能是原始数据目录本身或其父目录')
+    out.mkdir(parents=True,exist_ok=True)
+    run=out/('check_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]); run.mkdir(); marker(run)
+    previous=Path(job['log'])
+    if previous.is_file(): shutil.copyfile(previous,run/'workflow.log')
+    job['run']=str(run); job['log']=str(run/'workflow.log')
+    stage_report(run,'00_checks','输入与配对检查' if action=='inspect' else '运行环境检查',results={'inspection':job.get('result')},notes=['输入检查只抽查前 1000 条 reads，不等于全文件完整性检测。' if action=='inspect' else '请查看每项 ok 状态；检查结束不表示所有依赖均通过，也不表示已分析测序数据。'])
+
 def preprocess(job,c,quality_only=False):
+    c=dict(c)
+    auto=c.get('parameter_mode')=='auto'
+    if auto or not str(c.get('threads','')).strip(): c['threads']=str(min(4,os.cpu_count() or 1))
+    if not str(c.get('min_frequency','')).strip(): c['min_frequency']='1'
     job['step']='检查输入及运行依赖'
     samples=discover(c); out=path(c['output'])
     raw=path(c['input'])
@@ -285,8 +353,8 @@ def preprocess(job,c,quality_only=False):
     if not quality_only:
         integer(c,'min_frequency',1,1000000)
         if c.get('max_depth','').strip(): integer(c,'max_depth',2,100000000)
-    if not quality_only and c['mode']=='paired': check_overlap(c)
-    elif not quality_only:
+    if not quality_only and not auto and c['mode']=='paired': check_overlap(c)
+    elif not quality_only and not auto:
         if integer(c,'trunc_f',1,1000)<=integer(c,'trim_f',0,500): raise ValueError('截断位置须大于 trim')
     primer_mode=c.get('primer_mode')
     if primer_mode not in ('removed','341F','338F','custom'): raise ValueError('请根据检测证据确认引物处理方式后再运行')
@@ -313,6 +381,7 @@ def preprocess(job,c,quality_only=False):
     else:
         out.mkdir(parents=True,exist_ok=True)
         run=out/('run_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]); run.mkdir()
+        initialize_layout(run,'preprocess')
         if not quality_only: (run/'preprocess_started.json').write_text('{}')
     marker(run)
     job['run']=str(run); job['log']=str(run/'workflow.log')
@@ -320,39 +389,69 @@ def preprocess(job,c,quality_only=False):
     (run/'parameters.json').write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf8')
     (run/'input_inventory.json').write_text(json.dumps([{'path':v,'size':Path(v).stat().st_size,'mtime_ns':Path(v).stat().st_mtime_ns} for x in samples for v in x['files'].values()],indent=2),encoding='utf8')
     write_metadata(run,[(x['SampleID'],x['Group']) for x in samples])
-    with (run/'manifest.tsv').open('w',encoding='utf8',newline='') as f:
+    with artifact_path(run,'manifest.tsv').open('w',encoding='utf8',newline='') as f:
         w=csv.writer(f,delimiter='\t')
         w.writerow(['sample-id','forward-absolute-filepath','reverse-absolute-filepath'] if c['mode']=='paired' else ['sample-id','absolute-filepath'])
         for x in samples: w.writerow([x['SampleID'],x['files']['1']]+([x['files']['2']] if c['mode']=='paired' else []))
+    begin_stage(job,'00_inputs','输入、分组及软件记录',{'mode':c['mode'],'qiime_env':c.get('env',''),'r_env':c.get('r_env','16s-workstation-r')})
     q(job,c,'info')
     if not quality_only: command(job,r_command(c,'--version'),run,process_env=r_execution_env(c))
     if not quality_only:
         command(job,r_command(c,str(ROOT/'check_r.R'),c['font']),run,process_env=r_execution_env(c))
         q(job,c,'tools','peek',classifier)
-    job['step']='导入 FASTQ 与质量概览'
+    groups={g:sum(x['Group']==g for x in samples) for g in sorted({x['Group'] for x in samples})}
+    finish_stage(job,{'sample_count':len(samples),'groups':groups,'mapping':[{'SampleID':x['SampleID'],'Group':x['Group'],'files':x['files']} for x in samples]},['每个样本的输入文件及分组已记录；原始 FASTQ 保持不变。','软件版本与实际命令见 workflow.log 和 commands.jsonl。','本工作站接收已拆分到样本的 FASTQ，不进行 barcode 拆样。'])
     paired=c['mode']=='paired'
     source='demux.qza' if primer_mode=='removed' else 'trimmed.qza'
     if not reuse:
+        begin_stage(job,'01_import','FASTQ 导入与原始质量统计',{'encoding':'Phred33','quality_sample_size':10000})
         q(job,c,'tools','import','--type','SampleData[PairedEndSequencesWithQuality]' if paired else 'SampleData[SequencesWithQuality]', '--input-path','manifest.tsv','--output-path','demux.qza','--input-format','PairedEndFastqManifestPhred33V2' if paired else 'SingleEndFastqManifestPhred33V2')
         q(job,c,'demux','summarize','--i-data','demux.qza','--o-visualization','demux.qzv')
+        raw_counts=export_quality(job,c,'demux.qzv','quality-raw')
+        finish_stage(job,raw_counts,['样本序列数量为完整文件计数；逐位置质量分布来自随机抽样，不代表每条 read 的完整质量。','已保存 per-sample-fastq-counts.tsv、forward-seven-number-summaries.tsv；双端还保存 reverse 表。'])
         if primer_mode!='removed':
-            job['step']='去除引物（未匹配引物的 reads 丢弃，数量见日志）'
+            begin_stage(job,'02_primers','引物去除与处理后质量统计',{'forward':forward,'reverse':reverse,'error_rate':0.1,'minimum_primer_overlap':min(len(forward),len(reverse)),'discard_untrimmed':True})
             args=['cutadapt','trim-paired' if paired else 'trim-single','--i-demultiplexed-sequences','demux.qza','--p-front-f' if paired else '--p-front',forward,'--p-discard-untrimmed','--p-cores',c['threads'],'--o-trimmed-sequences','trimmed.qza']
+            args+=['--p-error-rate','0.1','--p-overlap',str(min(len(forward),len(reverse)))]
             if paired: args += ['--p-front-r',reverse]
             q(job,c,*args); source='trimmed.qza'
             q(job,c,'demux','summarize','--i-data',source,'--o-visualization','trimmed.qzv')
+            trimmed_counts=export_quality(job,c,'trimmed.qzv','quality-trimmed')
+            finish_stage(job,{'before':raw_counts,'after':trimmed_counts},['cutadapt 按匹配长度计算允许错误率，不等于固定允许 2 个引物错配。','未匹配指定引物的 reads 被丢弃；是否已去引物须依据来源说明和检测证据确认。'])
+        else:
+            stage_report(run,'02_primers','引物处理',status='skipped',parameters={'primer_mode':'removed'},notes=['用户确认 FASTQ 已去除引物，本步不重复切除；额外 trim 默认 0。'])
+    else:
+        export_quality(job,c,'demux.qzv','quality-raw')
+        if primer_mode!='removed': export_quality(job,c,'trimmed.qzv','quality-trimmed')
+    advice=save_quality_advice(job,c)
+    stage_report(run,'08_parameter_advice','自动参数推荐',results=advice,notes=['推荐采用质量分布和抽样长度的保守启发式，不是 QIIME 2 官方固定阈值，也不是保证最优参数。','质量表无法计算每条 read 的预期错误数或推断真实扩增子长度。'])
     if quality_only:
         inventory(run)
         (run/'quality_complete.json').write_text('{}')
-        job['step']='质量检查完成；查看质量图后填写截断参数，再继续预处理'
+        job['step']='质量检查完成；质量表和参数推荐已保存，可继续预处理'
         return
-    job['step']='DADA2 降噪'
+    if auto:
+        if not advice['parameters']: raise ValueError('质量统计不足，不能自动设置截断；请检查推荐说明或切换手动参数')
+        c.update(advice['parameters'])
+    if paired: check_overlap(c)
+    elif integer(c,'trunc_f',1,1000)<=integer(c,'trim_f',0,500): raise ValueError('截断位置须大于 trim')
+    saved.update(c); saved['parameter_source']='automatic_quality_heuristic' if auto else 'user'
+    saved['dada2_qc']={'max_ee':2,'trunc_q':2,'min_overlap':12 if paired else None,'max_merge_mismatch':0 if paired else None,'chimera_method':'consensus'}
+    (run/'parameters.json').write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf8')
+    begin_stage(job,'03_dada2','DADA2 质控、降噪、拼接及去嵌合体',{k:c.get(k,'') for k in ('trunc_f','trunc_r','trim_f','trim_r','amplicon','threads')} | saved['dada2_qc'])
     args=['dada2','denoise-paired' if paired else 'denoise-single','--i-demultiplexed-seqs',source,'--p-n-threads',c['threads'],'--o-table','dada2-table.qza','--o-representative-sequences','dada2-rep-seqs.qza','--o-denoising-stats','dada2-stats.qza']
     args += ['--p-trunc-len-f' if paired else '--p-trunc-len',c['trunc_f'],'--p-trim-left-f' if paired else '--p-trim-left',c['trim_f']]
-    if paired: args+=['--p-trunc-len-r',c['trunc_r'],'--p-trim-left-r',c['trim_r']]
+    args+=['--p-chimera-method','consensus','--p-trunc-q','2']
+    if paired: args+=['--p-trunc-len-r',c['trunc_r'],'--p-trim-left-r',c['trim_r'],'--p-max-ee-f','2','--p-max-ee-r','2','--p-min-overlap','12','--p-max-merge-mismatch','0']
+    else: args+=['--p-max-ee','2']
     q(job,c,*args)
     q(job,c,'metadata','tabulate','--m-input-file','dada2-stats.qza','--o-visualization','dada2-stats.qzv')
-    job['step']='分类与过滤'
+    export_artifact(job,c,'dada2-stats.qza','exports/denoising-stats')
+    export_artifact(job,c,'dada2-table.qza','exported-dada2-table')
+    command(job,conda_cmd(c)+['biom','convert','-i',str(artifact_path(run,'exported-dada2-table/feature-table.biom')),'-o',str(artifact_path(run,'exported-dada2-table/feature-table.tsv')),'--to-tsv'],run)
+    dada_summary=denoising_counts(artifact_path(run,'exports/denoising-stats'))
+    finish_stage(job,{'denoising':dada_summary,'asv_table':table_summary(artifact_path(run,'exported-dada2-table/feature-table.tsv'))},['input 是输入数量，filtered 是质量过滤后数量，denoised 是降噪后数量，merged 是拼接后数量，non-chimeric 是去嵌合体后数量；双端按读对/合并序列计数。','按预期错误数过滤并学习错误模型；不采用逐 read 的 Q20/10bp 滑窗质控。','双端在降噪后拼接，至少 12bp 重叠且允许 0 个错配。','consensus 在各样本检测嵌合体并汇总去除；不额外使用 USEARCH/gold。','扩增子长度未知时没有预先验证重叠，请核对每个样本 merged 和 non-chimeric 保留率。','官方依据：https://github.com/qiime2/q2-dada2/blob/2025.7.0/q2_dada2/_denoise.py'])
+    begin_stage(job,'04_taxonomy_filter','物种分类与特征过滤',{'classifier':str(classifier),'min_frequency':c['min_frequency'],'exclude':['Archaea','mitochondria','chloroplast']})
     q(job,c,'feature-classifier','classify-sklearn','--i-classifier',classifier,'--i-reads','dada2-rep-seqs.qza','--p-n-jobs','1','--o-classification','taxonomy.qza')
     q(job,c,'metadata','tabulate','--m-input-file','taxonomy.qza','--o-visualization','taxonomy.qzv')
     q(job,c,'feature-table','summarize','--i-table','dada2-table.qza','--m-sample-metadata-file','metadata.tsv','--o-visualization','dada2-table.qzv')
@@ -361,35 +460,27 @@ def preprocess(job,c,quality_only=False):
     q(job,c,'feature-table','filter-seqs','--i-data','dada2-rep-seqs.qza','--i-table','filtered-table.qza','--o-filtered-data','filtered-rep-seqs.qza')
     q(job,c,'feature-table','summarize','--i-table','filtered-table.qza','--m-sample-metadata-file','metadata.tsv','--o-visualization','filtered-table.qzv')
     q(job,c,'taxa','barplot','--i-table','filtered-table.qza','--i-taxonomy','taxonomy.qza','--m-metadata-file','metadata.tsv','--o-visualization','taxa-barplot.qzv')
-    job['step']='系统发育树与抽平曲线'
+    for src,dest in [('filtered-table.qza','exported-table'),('taxonomy.qza','exported-taxonomy'),('filtered-rep-seqs.qza','exported-sequences')]: export_artifact(job,c,src,dest)
+    command(job,conda_cmd(c)+['biom','convert','-i',str(artifact_path(run,'exported-table/feature-table.biom')),'-o',str(artifact_path(run,'exported-table/feature-table.tsv')),'--to-tsv'],run)
+    finish_stage(job,{'before':table_summary(artifact_path(run,'exported-dada2-table/feature-table.tsv')),'after':table_summary(artifact_path(run,'exported-table/feature-table.tsv'))},['默认最低总丰度为 1，不额外删除低丰度 ASV；手动提高会影响丰富度与 Chao1。','当前流程以细菌为目标，排除古菌、叶绿体、线粒体。','本阶段输出为未抽平表；分类组成图使用它。'])
+    begin_stage(job,'05_phylogeny','系统发育树构建',{'method':'MAFFT + masked alignment + FastTree','threads':c['threads']})
     q(job,c,'phylogeny','align-to-tree-mafft-fasttree','--i-sequences','filtered-rep-seqs.qza','--p-n-threads',c['threads'],'--o-alignment','aligned.qza','--o-masked-alignment','masked.qza','--o-tree','unrooted-tree.qza','--o-rooted-tree','rooted-tree.qza')
-    q(job,c,'tools','export','--input-path','filtered-table.qza','--output-path','exported-table')
-    q(job,c,'tools','export','--input-path','taxonomy.qza','--output-path','exported-taxonomy')
-    q(job,c,'tools','export','--input-path','filtered-rep-seqs.qza','--output-path','exported-sequences')
-    command(job,conda_cmd(c)+['biom','convert','-i','exported-table/feature-table.biom','-o','exported-table/feature-table.tsv','--to-tsv'],run)
+    export_artifact(job,c,'rooted-tree.qza','exports/phylogeny')
+    finish_stage(job,{'input_asv_count':table_summary(artifact_path(run,'exported-table/feature-table.tsv'))['asv_count']},['使用过滤后的代表序列构建系统发育树，供 Faith PD 和 UniFrac 使用。'])
     depth_counts=totals(run)
     curve_depth=int(c['max_depth']) if c.get('max_depth','').strip() else int(max(depth_counts.values()))
     if curve_depth<2: raise ValueError('过滤后序列数不足，无法生成抽平曲线')
     saved['effective_curve_max_depth']=curve_depth
     (run/'parameters.json').write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf8')
+    begin_stage(job,'06_rarefaction','多深度抽平曲线',{'max_depth':curve_depth,'source':'filtered unrarefied table','metrics':['shannon','observed_features','faith_pd']})
     q(job,c,'diversity','alpha-rarefaction','--i-table','filtered-table.qza','--i-phylogeny','rooted-tree.qza','--m-metadata-file','metadata.tsv','--p-max-depth',curve_depth,'--p-metrics','shannon','observed_features','faith_pd','--o-visualization','alpha-rarefaction.qzv')
-    export_artifact(job,c,'dada2-stats.qza','exports/denoising-stats')
-    export_artifact(job,c,'rooted-tree.qza','exports/phylogeny')
+    finish_stage(job,{'sample_depths':depth_counts,'max_depth':curve_depth},['此处只生成多个深度的诊断曲线，原始过滤后特征表不被覆盖。','正式抽平深度须结合曲线平台与各组样本保留情况选择，不按显著性选择。'])
     inventory(run)
     (run/'preprocess_complete.json').write_text(json.dumps({'completed_at':time.time()}))
     job['step']='预处理完成；查看曲线和样本深度后选择抽平深度'
 
 def totals(run):
-    table=run/'exported-table/feature-table.tsv'
-    with table.open(encoding='utf8') as f:
-        lines=[l for l in f if not l.startswith('# Constructed')]
-    rows=list(csv.reader(lines,delimiter='\t'))
-    if not rows or len(rows[0])<2: raise ValueError('特征表为空')
-    ids=rows[0][1:]; counts={sid:0 for sid in ids}
-    for row in rows[1:]:
-        if len(row)!=len(ids)+1: raise ValueError('特征表列数不一致')
-        for sid,v in zip(ids,row[1:]): counts[sid]+=float(v)
-    return counts
+    return table_summary(artifact_path(run,'exported-table/feature-table.tsv'))['per_sample']
 
 def retention(run,depth):
     c=json.loads((run/'parameters.json').read_text(encoding='utf8')); counts=totals(run)
@@ -424,17 +515,22 @@ def diversity(job,c):
     groups={g for _,g in rows}; orig={x['Group'] for x in kept}
     if len(groups)<2 or groups!=orig: raise ValueError('此深度使某个组全部丢失或不足两组，不能进行分组检验')
     if len(rows)<=len(groups) or any(sum(g==gg for _,g in rows)<2 for gg in groups): raise ValueError('每组至少需要2个保留样本；样本不足不能运行完整分组检验')
-    sub=run/('diversity_'+str(depth)+'_'+uuid.uuid4().hex[:8]); sub.mkdir()
+    analysis_root=run/'07_diversity'; analysis_root.mkdir(exist_ok=True)
+    sub=analysis_root/('diversity_'+str(depth)+'_'+uuid.uuid4().hex[:8]); sub.mkdir()
+    initialize_layout(sub,'diversity')
     marker(sub)
     job['run']=str(sub); job['log']=str(sub/'workflow.log'); job['step']='单次抽平与核心多样性'
-    write_metadata(sub,rows); (sub/'retention.json').write_text(json.dumps(kept,ensure_ascii=False,indent=2),encoding='utf8')
+    write_metadata(sub,rows); artifact_path(sub,'retention.json').write_text(json.dumps(kept,ensure_ascii=False,indent=2),encoding='utf8')
     (sub/'parameters.json').write_text(json.dumps({'depth':depth,'permutations':perms,'preprocess':str(run),'config':saved},ensure_ascii=False,indent=2),encoding='utf8')
     # QIIME's random rarefaction may differ between runs. Preserve this table; do not re-rarefy for plots.
-    q(job,saved,'diversity','core-metrics-phylogenetic','--i-phylogeny',run/'rooted-tree.qza','--i-table',run/'filtered-table.qza','--p-sampling-depth',depth,'--m-metadata-file','metadata.tsv','--output-dir','core-metrics-results')
-    (sub/'alpha').mkdir(); (sub/'beta').mkdir()
+    begin_stage(job,'01_core_metrics','正式单次抽平与核心多样性',{'sampling_depth':depth,'retained_samples':len(rows)})
+    q(job,saved,'diversity','core-metrics-phylogenetic','--i-phylogeny',artifact_path(run,'rooted-tree.qza'),'--i-table',artifact_path(run,'filtered-table.qza'),'--p-sampling-depth',depth,'--m-metadata-file','metadata.tsv','--output-dir','core-metrics-results')
+    artifact_path(sub,'alpha').mkdir(parents=True,exist_ok=True); artifact_path(sub,'beta').mkdir(parents=True,exist_ok=True)
     q(job,saved,'feature-table','summarize','--i-table','core-metrics-results/rarefied_table.qza','--m-sample-metadata-file','metadata.tsv','--o-visualization','core-metrics-results/rarefied_table.qzv')
+    finish_stage(job,{'retained_samples':len(rows),'dropped_samples':len(kept)-len(rows),'retention':kept},['每次核心分析仅抽平一次；保存本次抽平表，后续多样性指标和 R 绘图不重复抽平。','不足本次深度的样本被排除；重跑的随机抽平结果可能不同。'])
+    begin_stage(job,'02_exports','多样性指标、距离与坐标导出')
     export_artifact(job,saved,'core-metrics-results/rarefied_table.qza','exported-rarefied-table')
-    command(job,conda_cmd(saved)+['biom','convert','-i','exported-rarefied-table/feature-table.biom','-o','exported-rarefied-table/feature-table.tsv','--to-tsv'],sub)
+    command(job,conda_cmd(saved)+['biom','convert','-i',str(artifact_path(sub,'exported-rarefied-table/feature-table.biom')),'-o',str(artifact_path(sub,'exported-rarefied-table/feature-table.tsv')),'--to-tsv'],sub)
     alpha_metrics=['observed_features','shannon','evenness','faith_pd','chao1','simpson','goods_coverage']
     for metric in ['chao1','simpson','goods_coverage']:
         q(job,saved,'diversity','alpha','--i-table','core-metrics-results/rarefied_table.qza','--p-metric',metric,'--o-alpha-diversity',f'core-metrics-results/{metric}_vector.qza')
@@ -444,32 +540,39 @@ def diversity(job,c):
         export_artifact(job,saved,f'core-metrics-results/{metric}_pcoa_results.qza',f'exports/pcoa/{metric}')
         export_artifact(job,saved,f'core-metrics-results/{metric}_distance_matrix.qza',f'exports/distance/{metric}')
     (sub/'qiime_outputs_complete.json').write_text(json.dumps({'completed_at':time.time()}))
+    finish_stage(job,{'alpha_metrics':alpha_metrics,'beta_metrics':['weighted_unifrac','unweighted_unifrac','bray_curtis','jaccard'],'rarefied_table':table_summary(artifact_path(sub,'exported-rarefied-table/feature-table.tsv'))},['七项 alpha 指标与四套距离/PCoA 均来自本次保存的抽平表。'])
 
-    job['step']='α Kruskal–Wallis 与 β PERMANOVA / PERMDISP'
+    begin_stage(job,'03_statistics','α Kruskal–Wallis 与 β PERMANOVA / PERMDISP',{'permutations':perms,'group_column':'Group'})
     stats=[]
     for metric in alpha_metrics:
-        reason=alpha_skip_reason(sub/f'exports/alpha/{metric}/alpha-diversity.tsv',rows)
+        reason=alpha_skip_reason(artifact_path(sub,f'exports/alpha/{metric}/alpha-diversity.tsv'),rows)
         stats.append({'metric':metric,'method':'KW and pairwise KW/BH','status':'skipped' if reason else 'pending','reason':reason})
-        (sub/'statistics_status.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8')
+        artifact_path(sub,'statistics_status.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8')
         if reason: continue
         q(job,saved,'diversity','alpha-group-significance','--i-alpha-diversity',f'core-metrics-results/{metric}_vector.qza','--m-metadata-file','metadata.tsv','--o-visualization',f'alpha/{metric}-group-significance.qzv')
         export_artifact(job,saved,f'alpha/{metric}-group-significance.qzv',f'exports/statistics/alpha_{metric}')
         stats[-1]['status']='executed'
-        (sub/'statistics_status.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8')
+        artifact_path(sub,'statistics_status.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8')
     for metric in ['weighted_unifrac','unweighted_unifrac','bray_curtis','jaccard']:
-        reason=distance_skip_reason(sub/f'exports/distance/{metric}/distance-matrix.tsv')
+        reason=distance_skip_reason(artifact_path(sub,f'exports/distance/{metric}/distance-matrix.tsv'))
         for method in ['permanova','permdisp']:
             stats.append({'metric':metric,'method':method,'status':'skipped' if reason else 'pending','reason':reason})
-            (sub/'statistics_status.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8')
+            artifact_path(sub,'statistics_status.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8')
             if reason: continue
             q(job,saved,'diversity','beta-group-significance','--i-distance-matrix',f'core-metrics-results/{metric}_distance_matrix.qza','--m-metadata-file','metadata.tsv','--m-metadata-column','Group','--p-method',method,'--p-pairwise','--p-permutations',perms,'--o-visualization',f'beta/{metric}-{method}.qzv')
             export_artifact(job,saved,f'beta/{metric}-{method}.qzv',f'exports/statistics/beta_{metric}_{method}')
             stats[-1]['status']='executed'
-            (sub/'statistics_status.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8')
+            artifact_path(sub,'statistics_status.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8')
     inventory(sub)
     (sub/'qiime_statistics_complete.json').write_text(json.dumps({'completed_at':time.time()}))
-    job['step']='R 绘图：读取保存的 QIIME 2 指标、PCoA 与分类表'
+    finish_stage(job,{'executed':sum(x['status']=='executed' for x in stats),'skipped':sum(x['status']=='skipped' for x in stats),'tests':stats},['检验采用 QIIME 2 保存的结果；常数指标或全零距离会注明原因并跳过，不生成虚构 P 值。'])
+    begin_stage(job,'04_R_figures','R 绘图：读取保存的 QIIME 2 结果',{'font':saved['font'],'r_env':saved.get('r_env','16s-workstation-r')})
     command(job,r_command(saved,str(ROOT/'render.R'),str(sub),saved['font'],str(run),saved.get('plot_scripts','')),sub,process_env=r_execution_env(saved))
+    figure_root=artifact_path(sub,'R_original_style')
+    summary_file=figure_root/'render_summary.json'
+    if not summary_file.is_file(): raise ValueError('R 命令结束但没有生成绘图摘要，请查看运行日志')
+    summary=json.loads(summary_file.read_text(encoding='utf8'))
+    finish_stage(job,{'render':summary,'figures':{ext:len(list(figure_root.rglob('*.'+ext))) for ext in ('svg','pdf','png')}},['多样性图读取保存的抽平结果；分类组成图读取过滤后未抽平表。','R 只绘图和整理已保存的统计结果，不重新抽平、计算 PCoA 或进行检验。'])
     inventory(sub)
     (sub/'complete.json').write_text(json.dumps({'completed_at':time.time(),'note':'保存本次随机抽平表；重跑可能不同。'}),encoding='utf8')
     job['step']='分析完成：SVG、统计表、QZA/QZV 与抽平特征表已保存'
@@ -480,11 +583,15 @@ def worker(job,action,c):
         elif action=='inspect':
             job['result']=discover(c); job['step']='输入检查完成（检测前1000条，不代表全文件完整性）'
         elif action=='quality': preprocess(job,c,quality_only=True)
+        elif action=='recommend': refresh_quality_advice(job,c)
         elif action=='preprocess': preprocess(job,c)
         elif action=='diversity': diversity(job,c)
+        if action in ('inspect','preflight'): save_check_results(job,c,action)
         job['status']='done'
     except Exception as e:
         job['status']='cancelled' if job.get('cancel') else 'failed'; job['error']=str(e)
+        if job.get('run') and job.get('stage_folder'):
+            stage_report(job['run'],job['stage_folder'],job['stage_title'],status=job['status'],parameters=job.get('stage_parameters'),results={'error':str(e)},notes=['此步骤没有成功完成；已生成的文件和此前成功步骤保留，不能据此宣称完整分析完成。'])
     finally:
         if job.get('run'):
             inventory(Path(job['run']))
@@ -532,6 +639,7 @@ class Handler(BaseHTTPRequestHandler):
                 entries.sort(key=lambda x:(not x['directory'],x['name'].lower()))
                 self.send({'path':str(directory),'parent':str(directory.parent),'entries':entries,'limited':len(entries)==2000})
             elif u.path=='/api/results': self.send(result_files(path(p['run'][0])))
+            elif u.path=='/api/quality-advice': self.send(quality_advice_for_run(p['run'][0],p.get('amplicon',[None])[0]))
             elif u.path=='/api/file':
                 filename=approved_file(p['path'][0]); size=filename.stat().st_size
                 self.send_response(200)
@@ -557,7 +665,7 @@ class Handler(BaseHTTPRequestHandler):
                     except ProcessLookupError: pass
                 self.send({'ok':True}); return
             action=self.path.removeprefix('/api/')
-            if action not in ('preflight','inspect','quality','preprocess','diversity'): raise ValueError('未知操作')
+            if action not in ('preflight','inspect','quality','recommend','preprocess','diversity'): raise ValueError('未知操作')
             self.send({'id':launch(action,c)})
         except Exception as e: self.send({'error':str(e)},400)
 

@@ -55,8 +55,8 @@ def execute(name,assets,mutate=None,success=True):
 def read_csv(path):
  with path.open(encoding='utf-8-sig',newline='') as f:return list(csv.DictReader(f))
 
-def validate_positive(run,original):
- out=run/'R_original_style';summary=json.loads((out/'render_summary.json').read_text())
+def validate_positive(run,original,out=None):
+ out=out or run/'R_original_style';summary=json.loads((out/'render_summary.json').read_text())
  assert summary['original_assets']==original
  assert summary['source']=='saved_QIIME2_outputs'
  assert not (out/'alpha/alpha_KW_saved.csv').exists()
