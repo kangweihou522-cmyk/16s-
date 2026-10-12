@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from run_layout import initialize_layout, artifact_path, mapped_argument, quality_counts, denoising_counts, table_summary, stage_report
 from quality_advice import recommend_parameters
 from depth_advice import read_curves, recommend_depth
+from execution_record import prepare_execution, capture_r_sources, command_explanation, finalize_execution, now
 
 ROOT = Path(__file__).resolve().parent
 
@@ -184,13 +185,24 @@ def r_execution_env(c=None):
 
 def command(job,args,cwd=None,process_env=None):
     if job.get('cancel'): raise RuntimeError('用户已停止任务')
+    args=list(map(str,args)); capture_r_sources(job,args,cwd)
+    entry={'args':args,'cwd':str(Path(cwd or Path.cwd()).resolve()),'stage':job.get('stage_title',job.get('step','未指定阶段')),
+           'stage_parameters':dict(job.get('stage_parameters',{})),'started_at':now(),'exit_code':None,'status':'running'}
     with open(job['log'],'a',encoding='utf8') as f:
-        f.write('\n$ '+ __import__('shlex').join(map(str,args))+'\n'); f.flush()
-        proc=subprocess.Popen(list(map(str,args)),cwd=cwd,stdout=f,stderr=subprocess.STDOUT,start_new_session=True,env=process_env)
-        job['pid']=proc.pid
-        code=proc.wait(); job.pop('pid',None)
-    with Path(job['log']).with_name('commands.jsonl').open('a',encoding='utf8') as f:
-        f.write(json.dumps({'args':list(map(str,args)),'cwd':str(cwd),'finished_at':time.time(),'exit_code':code},ensure_ascii=False)+'\n')
+        f.write('\n# '+command_explanation(args)+'\n$ '+ __import__('shlex').join(args)+'\n'); f.flush()
+        try:
+            proc=subprocess.Popen(args,cwd=cwd,stdout=f,stderr=subprocess.STDOUT,start_new_session=True,env=process_env)
+            job['pid']=proc.pid
+            code=proc.wait(); entry['exit_code']=code
+            entry['status']='done' if code==0 else ('cancelled' if job.get('cancel') else 'failed')
+        except OSError as error:
+            entry.update(status='launch_failed',launch_error=str(error))
+            raise
+        finally:
+            job.pop('pid',None); entry['finished_at']=now()
+            with Path(job['log']).with_name('commands.jsonl').open('a',encoding='utf8') as commands:
+                commands.write(json.dumps(entry,ensure_ascii=False)+'\n')
+            if '_execution' in job: job['_execution']['commands'].append(entry)
     if code: raise RuntimeError(f'命令退出码 {code}，请查看日志；已生成的结果会保留')
     if job.get('cancel'): raise RuntimeError('用户已停止任务')
 
@@ -253,6 +265,24 @@ def inventory(run):
 def export_artifact(job,c,input_path,output_path):
     q(job,c,'tools','export','--input-path',input_path,'--output-path',output_path)
 
+def probe(job,args,timeout,process_env=None):
+    """Record dependency probes too, before a check-result directory exists."""
+    args=list(map(str,args)); capture_r_sources(job,args)
+    entry={'args':args,'cwd':str(Path.cwd()),'stage':job.get('step','运行环境检查'),
+           'stage_parameters':{'timeout_seconds':timeout},'started_at':now(),'exit_code':None,'status':'running'}
+    with Path(job['log']).open('a',encoding='utf8') as f:
+        f.write('\n# '+command_explanation(args)+'\n$ '+__import__('shlex').join(args)+'\n')
+    try:
+        proc=subprocess.run(args,text=True,capture_output=True,timeout=timeout,env=process_env)
+        entry.update(exit_code=proc.returncode,status='done' if proc.returncode==0 else 'failed')
+        return proc
+    except Exception as error:
+        entry.update(status='timeout' if isinstance(error,subprocess.TimeoutExpired) else 'launch_failed',launch_error=str(error))
+        raise
+    finally:
+        entry['finished_at']=now()
+        if '_execution' in job: job['_execution']['commands'].append(entry)
+
 def preflight(job,c):
     job['step']='检查 QIIME 2、插件、R 与分类器'
     result={'python':platform.python_version(),'cpu_threads':os.cpu_count(),'checks':[]}
@@ -260,7 +290,7 @@ def preflight(job,c):
         if job.get('cancel'): raise RuntimeError('用户已停止环境检查')
         try:
             args=[find_conda(c),'env','list','--json'] if name=='conda' else conda_cmd(c)+['qiime','info']
-            proc=subprocess.run(args,text=True,capture_output=True,timeout=180)
+            proc=probe(job,args,180)
             with Path(job['log']).open('a',encoding='utf8') as f:f.write('\n'+name+'\n'+proc.stdout+proc.stderr)
             item={'component':name,'ok':proc.returncode==0,'details':(proc.stdout+proc.stderr)[-8000:]}
             result['checks'].append(item)
@@ -269,17 +299,17 @@ def preflight(job,c):
     for plugin in ['dada2','cutadapt','feature-classifier','phylogeny','diversity','taxa','feature-table']:
         if job.get('cancel'): raise RuntimeError('用户已停止环境检查')
         try:
-            proc=subprocess.run(conda_cmd(c)+['qiime',plugin,'--help'],text=True,capture_output=True,timeout=90)
+            proc=probe(job,conda_cmd(c)+['qiime',plugin,'--help'],90)
             result['checks'].append({'component':'plugin '+plugin,'ok':proc.returncode==0,'details':'' if proc.returncode==0 else (proc.stdout+proc.stderr)[-2000:]})
         except Exception as e:result['checks'].append({'component':'plugin '+plugin,'ok':False,'details':str(e)})
     try:
-        proc=subprocess.run(r_command(c,str(ROOT/'check_r.R'),c.get('font','Times New Roman')),text=True,capture_output=True,timeout=90,env=r_execution_env(c))
+        proc=probe(job,r_command(c,str(ROOT/'check_r.R'),c.get('font','Times New Roman')),90,process_env=r_execution_env(c))
         result['checks'].append({'component':'专用 R 环境与绘图依赖','ok':proc.returncode==0,'details':(proc.stdout+proc.stderr)[-6000:]})
     except Exception as e:result['checks'].append({'component':'专用 R 环境与绘图依赖','ok':False,'details':str(e)})
     if c.get('classifier','').strip():
         try:
             classifier=path(c['classifier'])
-            proc=subprocess.run(conda_cmd(c)+['qiime','tools','peek',str(classifier)],text=True,capture_output=True,timeout=90)
+            proc=probe(job,conda_cmd(c)+['qiime','tools','peek',str(classifier)],90)
             detail=proc.stdout+proc.stderr
             result['checks'].append({'component':'用户选择的分类器','ok':proc.returncode==0 and 'TaxonomicClassifier' in detail,'details':detail[-3000:]})
         except Exception as e:result['checks'].append({'component':'用户选择的分类器','ok':False,'details':str(e)})
@@ -351,6 +381,8 @@ def save_check_results(job,c,action):
     run=out/('check_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]); run.mkdir(); marker(run)
     previous=Path(job['log'])
     if previous.is_file(): shutil.copyfile(previous,run/'workflow.log')
+    if '_execution' in job:
+        (run/'commands.jsonl').write_text(''.join(json.dumps(entry,ensure_ascii=False)+'\n' for entry in job['_execution']['commands']),encoding='utf8')
     job['run']=str(run); job['log']=str(run/'workflow.log')
     stage_report(run,'00_checks','输入与配对检查' if action=='inspect' else '运行环境检查',results={'inspection':job.get('result')},notes=['输入检查只抽查前 1000 条 reads，不等于全文件完整性检测。' if action=='inspect' else '请查看每项 ok 状态；检查结束不表示所有依赖均通过，也不表示已分析测序数据。'])
 
@@ -367,7 +399,7 @@ def preprocess(job,c,quality_only=False):
     integer(c,'threads',1,max(1,os.cpu_count() or 1))
     if not quality_only:
         integer(c,'min_frequency',1,1000000)
-        if c.get('max_depth','').strip(): integer(c,'max_depth',2,100000000)
+        if c.get('max_depth','').strip(): integer(c,'max_depth',3,100000000)
     if not quality_only and not auto and c['mode']=='paired': check_overlap(c)
     elif not quality_only and not auto:
         if integer(c,'trunc_f',1,1000)<=integer(c,'trim_f',0,500): raise ValueError('截断位置须大于 trim')
@@ -483,17 +515,19 @@ def preprocess(job,c,quality_only=False):
     export_artifact(job,c,'rooted-tree.qza','exports/phylogeny')
     finish_stage(job,{'input_asv_count':table_summary(artifact_path(run,'exported-table/feature-table.tsv'))['asv_count']},['使用过滤后的代表序列构建系统发育树，供 Faith PD 和 UniFrac 使用。'])
     depth_counts=totals(run)
-    curve_depth=integer(c,'max_depth',2,100000000) if c.get('max_depth','').strip() else int(max(depth_counts.values()))
-    if curve_depth<2: raise ValueError('过滤后序列数不足，无法生成抽平曲线')
+    curve_depth=integer(c,'max_depth',3,100000000) if c.get('max_depth','').strip() else int(max(depth_counts.values()))
+    if curve_depth<3: raise ValueError('抽平曲线最大深度至少为 3，才能生成两个或更多深度点')
     saved['effective_curve_max_depth']=curve_depth
     (run/'parameters.json').write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf8')
-    begin_stage(job,'06_rarefaction','多深度抽平曲线',{'max_depth':curve_depth,'source':'filtered unrarefied table','metrics':['shannon','observed_features','faith_pd']})
-    q(job,c,'diversity','alpha-rarefaction','--i-table','filtered-table.qza','--i-phylogeny','rooted-tree.qza','--m-metadata-file','metadata.tsv','--p-max-depth',curve_depth,'--p-metrics','shannon','observed_features','faith_pd','--o-visualization','alpha-rarefaction.qzv')
+    curve_metrics=['shannon','simpson','chao1','faith_pd','observed_features','goods_coverage','pielou_e']
+    curve_steps=min(10,curve_depth-1)
+    begin_stage(job,'06_rarefaction','多深度抽平曲线',{'min_depth':1,'max_depth':curve_depth,'steps':curve_steps,'iterations':10,'source':'filtered unrarefied table','metrics':curve_metrics})
+    q(job,c,'diversity','alpha-rarefaction','--i-table','filtered-table.qza','--i-phylogeny','rooted-tree.qza','--m-metadata-file','metadata.tsv','--p-min-depth','1','--p-max-depth',curve_depth,'--p-steps',curve_steps,'--p-iterations','10','--p-metrics',*curve_metrics,'--o-visualization','alpha-rarefaction.qzv')
     export_artifact(job,c,'alpha-rarefaction.qzv','exported-rarefaction')
     depth_advice=depth_advice_for_run(run)
     (run/'depth_recommendation.json').write_text(json.dumps(depth_advice,ensure_ascii=False,indent=2),encoding='utf8')
     job.setdefault('result',{})['depth_advice']=depth_advice
-    finish_stage(job,{'sample_depths':depth_counts,'max_depth':curve_depth,'depth_advice':depth_advice},['此处只生成多个深度的诊断曲线，原始过滤后特征表不被覆盖。','正式抽平深度推荐使用实际曲线与各组留样数，不读取P值；可人工修改。','平台变化阈值与90%留样是保守启发式，不是官方唯一最佳深度。'])
+    finish_stage(job,{'sample_depths':depth_counts,'max_depth':curve_depth,'metrics':curve_metrics,'depth_advice':depth_advice},['此处只生成多个深度的诊断曲线，原始过滤后特征表不被覆盖。','正式抽平深度推荐为严格低于本批最低过滤后 reads 的最大整百数；可人工修改，不读取 P 值。','曲线的三点平台判断独立显示，阈值为工作站启发式，不是官方唯一最佳深度。','Pielou 均匀度的 QIIME 曲线参数名为 pielou_e，核心分析保存的向量名为 evenness。'])
     inventory(run)
     (run/'preprocess_complete.json').write_text(json.dumps({'completed_at':time.time()}))
     job['step']='预处理完成；查看曲线和样本深度后选择抽平深度'
@@ -604,6 +638,7 @@ def diversity(job,c):
 
 def worker(job,action,c):
     try:
+        prepare_execution(job,ROOT,action,c,RUNTIME)
         if action=='preflight': preflight(job,c)
         elif action=='inspect':
             job['result']=discover(c); job['step']='输入检查完成（检测前1000条，不代表全文件完整性）'
@@ -619,8 +654,12 @@ def worker(job,action,c):
             stage_report(job['run'],job['stage_folder'],job['stage_title'],status=job['status'],parameters=job.get('stage_parameters'),results={'error':str(e)},notes=['此步骤没有成功完成；已生成的文件和此前成功步骤保留，不能据此宣称完整分析完成。'])
     finally:
         if job.get('run'):
+            try: finalize_execution(job)
+            except Exception as error:
+                job['status']='failed'; job['error']=str(job.get('error',''))+'；分析结果保留，但运行代码说明保存失败：'+str(error)
             inventory(Path(job['run']))
-            Path(job['run'],'job_status.json').write_text(json.dumps({k:v for k,v in job.items() if k not in ('pid',)},ensure_ascii=False,indent=2),encoding='utf8')
+            Path(job['run'],'job_status.json').write_text(json.dumps({k:v for k,v in job.items() if k!='pid' and not k.startswith('_')},ensure_ascii=False,indent=2),encoding='utf8')
+        job.pop('_execution',None)
 
 def launch(action,c):
     with LOCK:
@@ -647,7 +686,7 @@ class Handler(BaseHTTPRequestHandler):
             u=urlparse(self.path); p=parse_qs(u.query)
             if u.path=='/api/runtime': self.send(RUNTIME)
             elif u.path=='/api/status':
-                j=JOBS[p['id'][0]]; result=dict(j)
+                j=JOBS[p['id'][0]]; result={key:value for key,value in j.items() if not key.startswith('_')}
                 logfile=Path(j['log']); result['log_tail']=''
                 if logfile.exists():
                     with logfile.open('rb') as f:

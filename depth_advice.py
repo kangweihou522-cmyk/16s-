@@ -1,4 +1,4 @@
-"""Explainable depth candidates from saved counts and QIIME rarefaction CSVs."""
+"""Minimum-read depth advice and separate saved-curve diagnostics."""
 import csv
 import io
 import math
@@ -49,7 +49,7 @@ def read_curves(folder=None, visualization=None):
 
 
 def recommend_depth(samples, counts, curves=None):
-    """Heuristic advice, never use P values or rerun rarefaction."""
+    """Preserve every original sample; curves are diagnostic only."""
     curves = curves or {}
     groups = {}
     for sample in samples:
@@ -62,13 +62,25 @@ def recommend_depth(samples, counts, curves=None):
     if any(set(data) - known for data in curves.values()):
         raise ValueError('抽平曲线中的样本与本批分组不一致')
     warnings = []
-    required = {group: max(2, math.ceil(TARGET * len(members))) for group, members in groups.items()}
+    required = {group: len(members) for group, members in groups.items()}
+    diagnostic_required = {group: max(2, math.ceil(TARGET * len(members))) for group, members in groups.items()}
+    minimum_count = min((count for members in groups.values() for _, count in members), default=0)
+    usable_groups = len(groups) >= 2 and all(len(members) >= 2 for members in groups.values())
+    selected = ((minimum_count - 1) // 100) * 100 if minimum_count > 100 and usable_groups else None
+    if not usable_groups:
+        status = 'insufficient_samples'
+        warnings.append('无法推荐正式抽平深度：需要至少2个组，且每组至少2个原始样本。请人工检查分组设计后再决定分析方案。')
+    elif minimum_count <= 100:
+        status = 'insufficient_depth'
+        warnings.append(f'无法推荐正式抽平深度：原始样本中过滤后最小reads为{minimum_count}，不存在严格小于它的正100倍数；不能自动丢弃低计数或零计数样本。请人工检查过滤结果和低测序量样本。')
+    else:
+        status = 'minimum_read_rule'
     caps = []
     for group, members in groups.items():
         ordered = sorted((count for _, count in members), reverse=True)
-        caps.append(ordered[required[group] - 1] if len(ordered) >= required[group] else 0)
+        caps.append(ordered[diagnostic_required[group] - 1] if len(ordered) >= diagnostic_required[group] else 0)
     cap = min(caps) if caps and len(groups) >= 2 else 0
-    selected = None
+    curve_candidate = None
     evidence = None
     if cap >= 1 and set(THRESHOLDS).issubset(curves):
         available = [set(depth for values in curves[metric].values() for depth in values) for metric in THRESHOLDS]
@@ -90,21 +102,15 @@ def recommend_depth(samples, counts, curves=None):
                            for metric, vector in zip(THRESHOLDS, vectors)):
                         stable += 1
                 supported[group], evaluated[group] = stable, tested
-            if all(supported[group] >= required[group] for group in groups):
-                selected = base
+            if all(supported[group] >= diagnostic_required[group] for group in groups):
+                curve_candidate = base
                 evidence = {'depths': window, 'stable_samples_by_group': supported,
                             'evaluated_samples_by_group': evaluated}
                 break
-    if selected is not None:
-        status = 'plateau_candidate'
-    elif cap >= 1:
-        selected, status = cap, 'retention_only'
-        warnings.append('现有曲线未找到同时满足平台启发式及各组90%留样的深度；当前只是按样本保留给出的初步推荐，请查看曲线后确认。')
-    else:
-        status = 'insufficient_samples'
-        warnings.append('无法在保留各组至少90%样本且每组至少2个样本的条件下推荐正深度；请检查低测序量样本和分组设计。')
     if not set(THRESHOLDS).issubset(curves):
-        warnings.append('缺少完整的三项抽平曲线数据，未确认曲线平台。')
+        warnings.append('缺少完整的三项抽平曲线数据，无法完成曲线平台诊断；请人工查看已有曲线。曲线诊断不改变最小reads规则的推荐值。')
+    elif curve_candidate is None:
+        warnings.append('现有曲线未找到同时满足三点平台启发式及各组90%留样的诊断候选深度；请人工查看曲线。曲线诊断不改变最小reads规则的推荐值。')
     retention = [{'SampleID': sid, 'Group': group, 'count': count,
                   'retained': selected is not None and count >= selected}
                  for group, members in groups.items() for sid, count in members]
@@ -112,9 +118,12 @@ def recommend_depth(samples, counts, curves=None):
                 'retained': sum(row['retained'] for row in retention if row['Group'] == group),
                 'required': required[group]} for group, members in groups.items()]
     return {'recommended_depth': selected, 'status': status, 'groups': summary,
-            'retention': retention, 'retention_depth_cap': cap or None, 'curve_evidence': evidence,
-            'criteria': {'target_group_retention': TARGET, 'minimum_samples_per_group': 2,
+            'retention': retention, 'retention_depth_cap': minimum_count or None, 'curve_evidence': evidence,
+            'curve_plateau_candidate_depth': curve_candidate,
+            'criteria': {'target_group_retention': 1.0, 'minimum_samples_per_group': 2,
+                         'minimum_groups': 2, 'depth_multiple': 100, 'strictly_below_minimum_reads': True,
+                         'curve_target_group_retention': TARGET,
                          'curve_relative_change_limits': THRESHOLDS, 'curve_points': 3,
                          'minimum_depth_span_ratio': 1.2},
-            'method': '优先选三点曲线变化较小且各组至少90%留样的最早深度；无法确认平台时，仅按各组留样约束给出初步值。阈值为工作站启发式，不是官方统一最佳深度。',
+            'method': '正式推荐取所有原始样本中过滤后最小reads严格以下的最大正100倍数，保留全部样本。三点曲线平台启发式仅作独立诊断，不改变推荐深度，也不证明推荐深度这个具体点已通过曲线验证；诊断阈值不是官方统一最佳深度标准。',
             'warnings': warnings}

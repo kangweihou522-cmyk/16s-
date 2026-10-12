@@ -1,4 +1,4 @@
-# Windows / WSL 16S 本地分析工作站 v0.4
+# Windows / WSL 16S 本地分析工作站 v0.5
 
 浏览器操作，WSL Ubuntu 中使用你自己安装的 **QIIME 2 和 R** 计算。原始测序数据只读，每次生成独立结果目录；分类器由用户选择本地 `.qza` 文件。程序不调用任何 AI API，不需保持 ChatGPT/Codex 会话运行。
 
@@ -107,9 +107,11 @@ CAP2,LDC
 
 正式深度是每个样本随机保留的有效序列数，依据DADA2及后续过滤后的计数；不是read长度，也不是曲线最大深度。低于所选深度的样本不参与本次核心分析。
 
-推荐先要求每组至少保留90%的原样本且不少于2个，然后读取QIIME抽平曲线CSV中每个样本在各深度、各重复的指标均值，寻找最早的三点窗口：末点深度至少为首点的1.2倍；观测ASV与Faith PD变化≤5%、Shannon变化≤2%；每组至少90%原样本支持该窗口。上述比例和变化阈值是工作站启发式，不是官方统一最佳深度，也不是平台的统计显著性检验。
+正式推荐取**严格低于本批所有样本最低过滤后 reads 的最大正整百数**：`((最低reads - 1) // 100) * 100`。例如最低17105推荐17100，最低恰为17100推荐17000，保留全部样本。最低计数为0或不超过100、或分组不满足完整检验要求时，不自动丢样本或编造正整百值，要求人工检查。可以手动改变深度并重新预览保留情况；该选值规则不保证曲线已趋于平台。
 
-若没有兼顾曲线和留样的窗口，返回满足组内留样的最大深度，并明确标为“仅按样本保留给出的初步推荐”；缺少曲线时不宣称已确认平台。无法达到留样条件时不编造值。新run在 `06_rarefaction/curve_data/` 保存原始曲线CSV，推荐另存 `depth_recommendation.json` 并写入阶段报告；旧QZV也能直接读取，无需重新抽平。推荐不读取分组检验P值。
+曲线平台分析另作独立诊断，不改变正式推荐：读取每个样本在各深度、各重复的指标均值，寻找最早的三点窗口；末点至少为首点的1.2倍；观测ASV与Faith PD变化≤5%、Shannon变化≤2%；每组至少90%原样本支持该窗口。上述阈值是启发式，不是官方统一最佳深度，也不证明正式推荐这个具体点已验证。缺少曲线或没有候选窗口会明确提示。新run在 `06_rarefaction/curve_data/` 保存原始曲线CSV，推荐另存 `depth_recommendation.json` 并写入阶段报告；旧QZV也能直接读取，无需重新抽平。推荐不读取分组检验P值。
+
+抽平曲线覆盖七项指标：Shannon、Simpson、Chao1、Faith PD、observed features、Good’s coverage、Pielou均匀度（曲线参数名 `pielou_e`，核心分析向量名 `evenness`）。明确指定最小深度1、通常10个近似等间隔深度点、每点10次重复；最大深度过小时减少点数。`max-depth` 是曲线终点，留空默认过滤后最大样本计数，可手动调整异常高值；不等于正式抽平深度。深度超过某样本计数时，该样本不贡献该深度的曲线数据。依据：[QIIME 2 2025.7曲线实现](https://github.com/qiime2/q2-diversity/blob/2025.7.0/q2_diversity/_alpha/_visualizer.py)、[指标参数注册](https://github.com/qiime2/q2-diversity/blob/2025.7.0/q2_diversity/plugin_setup.py)。
 
 R把七项已计算α指标分别保存为 `alpha/observed_features`、`shannon`、`evenness`、`faith_pd`、`chao1`、`simpson`、`goods_coverage` 的SVG/PDF/PNG，每项有对应输入及注释CSV。全部指标不再合在一个α图里；缺少指标会明确报告，已有统计不可读取时仍不生成虚构显著性字母。
 
@@ -122,7 +124,7 @@ v0.4修复路径转换把 `qiime diversity alpha` 的动作名误改成 `03_stat
 - 导入、质量概览、可选cutadapt、DADA2表/代表序列/降噪统计。
 - 用户分类器sklearn分类和分类结果可视化。
 - 排除 Archaea、mitochondria、chloroplast，ASV全表最低总丰度默认1；过滤序列、分类堆积图、MAFFT/FastTree树。最低丰度可在网页修改；当前排除项固定，若研究包含古菌需另行调整。
-- 抽平曲线（Shannon、observed features、Faith PD）；核心抽平表。
+- 七项α抽平曲线（含 `pielou_e`）；核心抽平表。
 - 七项α：observed features、Shannon、evenness、Faith PD、Chao1、Simpson、Good’s coverage；QIIME总体/两两KW和保存的BH q值。
 - 四项β：weighted/unweighted UniFrac、Bray-Curtis、Jaccard，保存距离、PCoA、Emperor及总体/两两PERMANOVA与PERMDISP。
 - BIOM/TSV、分类TSV、序列FASTA、树、alpha向量、PCoA、距离及统计QZV的标准导出文件。
@@ -131,6 +133,15 @@ v0.4修复路径转换把 `qiime diversity alpha` 的动作名误改成 `03_stat
 已内置用户提供的QIIME结果读取/原始风格函数；无需本机额外保存原来的3个脚本。若已有自定义版本，可选择脚本目录覆盖内置函数。缺失或无法验证的保存统计不补造P值或显著性字母。R不重新抽平、计算PCoA、运行置换检验或再次BH校正已有q值。
 
 `workflow.log`、`commands.jsonl`、`parameters.json`、输入清单、样本保留情况、软件版本和 `outputs.tsv` 供复核。QIIME本身在QZA/QZV中保存provenance。
+
+每次质量、预处理、多样性等任务结束后，在该结果目录的 `09_execution_code/<任务类型>_<任务编号>/` 自动保存 UTF-8 文本文档：
+
+- `完整运行代码.txt`：实际执行的QIIME 2、BIOM、R命令，已转换的实际路径、参数、阶段说明、状态和退出码；完整Python/R源码附后。
+- `本次参数.txt`：用户请求参数和任务保存的最终生效参数，包含自动参数应用后的值。
+- `Python完整代码.txt`、`R完整代码.txt`：源码快照和简要说明；R包括本次实际加载的内置或用户自定义绘图函数。
+- 最终多样性任务的 `关联预处理代码.txt`：附上它使用的预处理历史记录。旧版缺少当时源码时，明确说明并保留原命令/参数记录，不用当前代码冒充旧版。
+
+失败或停止的任务同样保存已执行部分；质量检查继续为预处理时，各次代码记录分别保存。网页“查看与下载结果”可筛选 `09_execution_code` 下载。源码包含条件分支，实际执行路径以命令和阶段报告为准。文档供阅读复核，不作为可以直接粘贴重跑的脚本；随机抽平/置换不保证重跑相同。未显式设置的工具默认参数须结合软件版本与QZA/QZV provenance核查。
 
 如果某指标全部相同、两组值完全相同，或全部距离为0，相应检验会记录明确跳过原因；其他未经诊断的命令失败会停下并保留产物。统计状态保存在 `statistics_status.json`。R失败不会删除已完成的QIIME结果。随机抽平/置换重跑可能不同，因此保留每次产物，不能宣称固定种子复现。
 
@@ -148,12 +159,14 @@ v0.4修复路径转换把 `qiime diversity alpha` 的动作名误改成 `03_stat
   05_phylogeny/           比对、掩蔽、树及树导出
   06_rarefaction/         多深度抽平曲线
   08_parameter_advice/    自动推荐依据
+  09_execution_code/     各次任务的完整代码、参数与命令说明文本
   07_diversity/diversity_<深度>_<编号>/
     00_inputs/            本次保留样本分组与retention
     01_core_metrics/      本次抽平表、指标、距离、PCoA、Emperor
     02_exports/           抽平TSV、指标、坐标及统计导出
     03_statistics/        分组检验QZV及执行/跳过状态
     04_R_figures/         按alpha/beta/taxonomy分组的SVG/PDF/PNG/CSV
+    09_execution_code/   本次代码记录及关联预处理记录
   处理说明.md、参数、布局映射、运行状态、日志
 ```
 

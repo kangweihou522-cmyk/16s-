@@ -42,7 +42,7 @@ def materialize_qiime_outputs(job, config, *args):
     elif source == 'dada2-stats.qza':
         (destination / 'stats.tsv').write_text('sample-id\tinput\tfiltered\tdenoised\tmerged\tnon-chimeric\n#q2:types\tnumeric\tnumeric\tnumeric\tnumeric\tnumeric\n' + ''.join(f'{sid}\t1000\t950\t900\t800\t{125*(i+1)}\n' for i, sid in enumerate(ids)), encoding='utf8')
     elif source == 'alpha-rarefaction.qzv':
-        for metric,value in [('observed_features',1),('shannon',0),('faith_pd',0)]:
+        for metric,value in [('observed_features',1),('shannon',0),('faith_pd',0),('simpson',0),('chao1',1),('goods_coverage',1),('pielou_e',0)]:
             (destination/(metric+'.csv')).write_text('sample-id,depth-10_iter-1,depth-50_iter-1,depth-100_iter-1,Group\n'+''.join(f'{sample["SampleID"]},{value},{value},{value},{sample["Group"]}\n' for sample in samples),encoding='utf8')
 
 
@@ -93,6 +93,13 @@ class QualityPipelineTests(unittest.TestCase):
         dada = next(args for args in calls if args[:2] == ('dada2', 'denoise-paired'))
         for key, value in [('--p-chimera-method', 'consensus'), ('--p-min-overlap', '12'), ('--p-max-merge-mismatch', '0'), ('--p-max-ee-f', '2'), ('--p-max-ee-r', '2')]:
             self.assertEqual(dada[dada.index(key) + 1], value)
+        curve=next(args for args in calls if args[:2]==('diversity','alpha-rarefaction'))
+        self.assertEqual(set(curve[curve.index('--p-metrics')+1:curve.index('--o-visualization')]),
+                         {'shannon','simpson','chao1','faith_pd','observed_features','goods_coverage','pielou_e'})
+        for key,value in [('--p-min-depth','1'),('--p-steps',10),('--p-iterations','10')]:
+            self.assertEqual(curve[curve.index(key)+1],value)
+        for metric in ['shannon','simpson','chao1','faith_pd','observed_features','goods_coverage','pielou_e']:
+            self.assertTrue((run/'06_rarefaction/curve_data'/(metric+'.csv')).is_file())
         for folder in ('00_inputs', '01_import', '02_primers', '03_dada2', '04_taxonomy_filter', '05_phylogeny', '06_rarefaction', '08_parameter_advice'):
             self.assertTrue((run / folder / 'report.json').is_file())
         self.assertTrue((run / '03_dada2/dada2-table.qza').is_file())
