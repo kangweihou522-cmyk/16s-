@@ -208,6 +208,8 @@ QIIME 2 ANCOM在计数表上加官方伪计数后运行composition ancom，输�
 
 formatter输入前两行分别为Class与唯一SampleID，使用 `-c 1 -u 2 -f r -o -1`，避开官方1.1.2在无subject元数据时的 `KeyError: 'subject'`。SampleID作为样本标识保留，不成为丰度特征；没有配对或重复测量假定，实际参数与阶段说明记录这一用途。
 
+WSL无法联网更新、仍停留在5fec64a时，可用 `updates/update_lefse_windows.ps1` 在Windows下载约8KB的Git更新包，校验SHA256，再由Ubuntu本地导入并fast-forward到759b947。针对本次Ubuntu-24.04、`/root/16S-workstation-v02` 与Windows代理127.0.0.1:10808配置；保留Git历史与origin地址，检测本地源码改动时停止，不覆盖。先停止旧后台；脚本成功后启动8766端口。此包只包含该次源码修复，不是每次更新的通用安装包。
+
 默认KW/一致性阈值0.05、one-against-all多组策略；可选较严格all-against-all。只有SampleID与Group，不假定配对或subclass。官方LEfSe在每类少于10样本时的一致性步骤采用中位数规则，阶段说明记录这一行为。拟合以LDA截断0保留已计算的正得分，然后按用户阈值筛选；默认显示LDA>2。
 
 完成后显示柱状图和分类谱系分支图，各有PNG/SVG下载按钮。修改阈值并点击“重绘并预览”，只读取缓存得分，保存新预览目录；不重算KW、LDA或覆盖原图。分支图表示分类关系。无符合阈值的标志菌时生成明确的无命中提示图，不伪造分支或标志菌。原始检验结果有哈希验证。

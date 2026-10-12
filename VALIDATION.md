@@ -124,3 +124,9 @@ R测试数据是人工标准布局导出结果，不是用户真实样本；测�
 - 输入增加唯一SampleID行并使用 `-u 2`。官方get_class_slices仅依据class/subclass划分，唯一ID用于标识样本而不增加配对设计；SampleID元数据从丰度特征中剔除。
 - 核验官方1.1.2源码压缩包的Bioconda SHA256，在临时目录安装formatter所需的BIOM/HDF5依赖，执行真实formatter。20项相关检查通过，包括转换后样本ID/分组/每个候选分类单元CPM逐格一致，以及既有统计缓存/阈值重绘检查。首次新增测试因引用了错误的测试样本属性而失败，改为实际保存的samples后通过。
 - 真实检查只执行输入转换，没有执行KW/LDA统计模型，也没有使用用户原始数据或修改用户本机环境。
+
+## Windows下载与本地Git更新入口
+
+- 制作8268字节Git bundle，目标提交759b947，前置提交5fec64a，记录并校验SHA256。临时Git仓库只获取旧版提交（确认未含目标对象），实际verify/fetch/fast-forward后精确达到目标提交，工作树干净且包含SampleID与-u 2修复。测试准备时短提交号无法被本地fetch识别，改为完整提交号后验证通过。
+- Windows入口通过本机127.0.0.1:10808代理限时下载，校验更新包、检查main分支与本地改动、保留origin及历史，仅fast-forward源码。原数据与分析结果不在更新范围。成功后从WSL启动工作站。
+- 云环境没有PowerShell，未执行Windows脚本或验证用户Windows网络下载；已验证的是实际Git更新包和Linux离线导入。复用此前真实formatter与20项验证，不重跑统计模型。
