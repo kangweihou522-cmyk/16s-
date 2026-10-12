@@ -37,6 +37,23 @@ write_result <- function(value, filename) {
   TRUE
 }
 
+fit_ancom_model <- function(counts, meta, opts, fit_function = ANCOMBC::ancombc2) {
+  # Official matrix input avoids the optional microbiome dependency of phyloseq.
+  if (!is.matrix(counts) || !is.numeric(counts) || !is.data.frame(meta) ||
+      !identical(colnames(counts), rownames(meta)))
+    stop('ANCOM-BC2 matrix columns and metadata rows must match exactly')
+  fit_function(
+    data = counts, taxa_are_rows = TRUE, meta_data = meta,
+    tax_level = NULL, fix_formula = 'Group', rand_formula = NULL,
+    p_adj_method = opts$p_adj_method, pseudo_sens = opts$pseudo_sens,
+    prv_cut = opts$prv_cut, lib_cut = opts$lib_cut, group = 'Group',
+    struc_zero = opts$struc_zero, neg_lb = opts$neg_lb, alpha = opts$alpha,
+    n_cl = opts$threads, verbose = TRUE, global = opts$global, pairwise = opts$pairwise,
+    dunnet = FALSE, trend = FALSE,
+    iter_control = opts$iter_control, em_control = opts$em_control,
+    mdfdr_control = opts$mdfdr_control)
+}
+
 plot_effects <- function(res, directory, reference, font) {
   fields <- if (is.null(res) || !'taxon' %in% names(res)) character() else grep('^lfc_Group', names(res), value = TRUE)
   plots <- character()
@@ -102,7 +119,7 @@ main <- function() {
   if (length(args) != 3L || !args[1] %in% c('--check', '--run', '--plot-qiime'))
     stop('Usage: differential_ancombc.R --check|--run|--plot-qiime options.json run_directory')
   required <- if (args[1] == '--plot-qiime') c('jsonlite', 'ggplot2', 'svglite') else
-    c('ANCOMBC', 'phyloseq', 'jsonlite', 'ggplot2', 'svglite')
+    c('ANCOMBC', 'jsonlite', 'ggplot2', 'svglite')
   available <- vapply(required, requireNamespace, logical(1), quietly = TRUE)
   if (any(!available) && args[1] == '--plot-qiime') stop(paste('Missing isolated R plotting dependencies:',
                     paste(required[!available], collapse = ', '), '; run 安装依赖.sh for the selected plotting r_env.'))
@@ -125,23 +142,15 @@ main <- function() {
     counts <- read_count_input(entry$counts_tsv)
     meta <- read_group_metadata(opts$metadata_tsv, colnames(counts), opts$reference_group, unlist(opts$groups))
     if (any(colSums(counts) <= 0)) stop('Zero count library; no pseudocount replacement is permitted')
-    ps <- phyloseq::phyloseq(phyloseq::otu_table(counts, taxa_are_rows = TRUE), phyloseq::sample_data(meta))
     warnings <- character()
     started <- format(Sys.time(), tz = 'UTC', usetz = TRUE)
     set.seed(opts$seed)
     model_error <- NULL
-    fit <- tryCatch(withCallingHandlers(ANCOMBC::ancombc2(
-      data = ps, tax_level = NULL, fix_formula = 'Group', rand_formula = NULL,
-      p_adj_method = opts$p_adj_method, pseudo_sens = opts$pseudo_sens,
-      prv_cut = opts$prv_cut, lib_cut = opts$lib_cut, group = 'Group',
-      struc_zero = opts$struc_zero, neg_lb = opts$neg_lb, alpha = opts$alpha,
-      n_cl = opts$threads, verbose = TRUE, global = opts$global, pairwise = opts$pairwise,
-      dunnet = FALSE, trend = FALSE,
-      iter_control = opts$iter_control, em_control = opts$em_control,
-      mdfdr_control = opts$mdfdr_control),
+    fit <- tryCatch(withCallingHandlers(fit_ancom_model(counts, meta, opts),
       warning = function(w) { warnings <<- c(warnings, conditionMessage(w)) }),
       error = function(e) { model_error <<- conditionMessage(e); NULL })
     if (!is.null(model_error)) {
+      message('L', entry$level, ' (', entry$name, ') ANCOM-BC2 failed: ', model_error)
       failure <- list(level = entry$level, method = 'ANCOM-BC2', status = 'failed',
                        error = model_error, warnings = unique(warnings),
                        note = 'No p/q or effect estimates created for a failed model')

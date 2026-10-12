@@ -17,8 +17,8 @@ else
   operation=create
 fi
 "$conda_bin" "$operation" --name "$ancom_env_name" --override-channels -c conda-forge -c bioconda --strict-channel-priority -y \
-  'r-base>=4.4,<4.6' 'bioconductor-ancombc>=2.8,<3' bioconductor-phyloseq r-jsonlite r-ggplot2 r-svglite
+  'r-base>=4.4,<4.6' 'bioconductor-ancombc>=2.8,<3' r-jsonlite r-ggplot2 r-svglite
 "$conda_bin" run --no-capture-output -n "$ancom_env_name" /usr/bin/env -u R_HOME -u LD_LIBRARY_PATH -u LD_PRELOAD \
   R_LIBS=/dev/null R_LIBS_USER=/dev/null R_LIBS_SITE=/dev/null R_PROFILE=/dev/null R_PROFILE_USER=/dev/null \
   R_ENVIRON=/dev/null R_ENVIRON_USER=/dev/null Rscript --vanilla -e \
-  'for(p in c("ANCOMBC","phyloseq","jsonlite","ggplot2","svglite")){stopifnot(requireNamespace(p,quietly=TRUE));cat(p,as.character(packageVersion(p)),"\n")};stopifnot("ancombc2" %in% getNamespaceExports("ANCOMBC"));cat(R.version.string,"\n")'
+  'for(p in c("ANCOMBC","jsonlite","ggplot2","svglite")){stopifnot(requireNamespace(p,quietly=TRUE));cat(p,as.character(packageVersion(p)),"\n")};stopifnot("ancombc2" %in% getNamespaceExports("ANCOMBC"));cat(R.version.string,"\n")'

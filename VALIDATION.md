@@ -104,3 +104,10 @@ R测试数据是人工标准布局导出结果，不是用户真实样本；测�
 - Python编译、R解析、安装脚本bash语法、源码空白及SHA256清单通过。
 
 尚未验证：ANCOM专用环境的实际包求解安装、真实ANCOM-BC2/LEfSe/PICRUSt2数据分析、用户Windows/WSL运行。原始归档ANCOM-II未接入，界面区分ANCOM-BC2与QIIME ANCOM；不能将本版宣称为完成原始ANCOM-II实现。
+
+## ANCOM-BC2矩阵输入修复
+
+- 官方ANCOMBC RELEASE_3_20源代码确认phyloseq输入要求microbiome，当前安装检查未涵盖该可选依赖。改为官方支持的原始矩阵+meta_data接口，显式taxa_are_rows=TRUE，保留Group参考及全部统计控制参数；各层级错误直接打印到日志。
+- 两项针对性真实R检查通过：矩阵/分组对应和全部统计参数传递、依赖缺失明确提示。未安装完整统计包或重复已有绘图测试。
+- 使用未经修改的官方data_sanity_check.R在15样本/三组的人工输入上检查通过，计数、样本ID和参考组顺序保持一致。单列元数据的初始检查暴露官方drop行为，改为工作站实际使用的sample-id+Group两列后通过；实际包装器始终传入这两列。此检查不拟合统计模型。
+- 安装脚本语法、源码差异及SHA256检查通过。用户此次失败的实际error仍待diagnostics.json确认；不能把这一已证实的调用依赖缺陷直接当作已验证的用户数据根因。

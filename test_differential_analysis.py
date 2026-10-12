@@ -183,6 +183,22 @@ class DifferentialTests(unittest.TestCase):
         self.assertIn('real R input checks passed', result.stdout)
 
     @unittest.skipUnless(RSCRIPT, 'A real R runtime is not installed')
+    def test_real_r_model_call_uses_matrix_with_explicit_aligned_metadata(self):
+        counts=self.root/'counts.tsv';self.counts(counts)
+        metadata=self.root/'metadata.tsv'
+        metadata.write_text('sample-id\tGroup\n0002\tCON\n0001\tCON\nCAP01\tA10\nCAP02\tA10\n')
+        opts=differential.options({'diff_method':'ancombc2','threads':'1'},SAMPLES)
+        options_file=self.root/'model_options.json';options_file.write_text(json.dumps(opts))
+        expr="""a<-commandArgs(TRUE);source(a[1]);m<-read_count_input(a[2]);d<-read_group_metadata(a[3],colnames(m),'CON',c('CON','A10'));o<-jsonlite::fromJSON(a[4],simplifyVector=FALSE)
+seen<-NULL;spy<-function(...){seen<<-list(...);'interface-only, not fitted statistics'}
+x<-fit_ancom_model(m,d,o,fit_function=spy)
+stopifnot(is.matrix(seen$data),identical(seen$data,m),identical(seen$meta_data,d),identical(seen$taxa_are_rows,TRUE),identical(seen$fix_formula,'Group'),is.null(seen$tax_level),identical(seen$p_adj_method,o$p_adj_method),identical(seen$pseudo_sens,o$pseudo_sens),identical(seen$prv_cut,o$prv_cut),identical(seen$lib_cut,o$lib_cut),identical(seen$struc_zero,o$struc_zero),identical(seen$neg_lb,o$neg_lb),identical(seen$alpha,o$alpha),identical(seen$n_cl,o$threads),identical(seen$global,o$global),identical(seen$pairwise,o$pairwise),identical(seen$iter_control,o$iter_control),identical(seen$em_control,o$em_control),identical(seen$mdfdr_control,o$mdfdr_control))
+bad<-d[rev(rownames(d)),,drop=FALSE];failure<-tryCatch(fit_ancom_model(m,bad,o,fit_function=spy),error=function(e)conditionMessage(e));stopifnot(grepl('match exactly',failure));cat('matrix metadata interface checked; no model fitted')"""
+        result=subprocess.run([RSCRIPT,'-e',expr,str(ROOT/'differential_ancombc.R'),str(counts),str(metadata),str(options_file)],capture_output=True,text=True,timeout=45)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn('no model fitted',result.stdout)
+
+    @unittest.skipUnless(RSCRIPT, 'A real R runtime is not installed')
     def test_real_r_dependency_failure_is_explicit_without_fake_statistics(self):
         probe = subprocess.run([RSCRIPT, '-e', 'quit(status=if(requireNamespace("ANCOMBC",quietly=TRUE)) 0 else 1)'],
                                capture_output=True, text=True, timeout=30)
