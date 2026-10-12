@@ -182,10 +182,11 @@ def finalize_execution(job):
                 if filename.is_file():
                     lines.extend(['# 旧版原始记录：' + str(filename), filename.read_text(encoding='utf8')])
         dependencies=effective.get('extension_parameters',{})
-        for key,label in [('abundance_run','复用的丰度导出'),('lefse_run','用于重绘的 LEfSe 原始检验'),('diversity_run','用于重绘的多样性原始指标及检验')]:
+        for key,label in [('abundance_run','复用的丰度导出'),('lefse_run','用于重绘的 LEfSe 原始检验'),('diversity_run','用于重绘的多样性原始指标及检验'),('differential_run','用于重绘的差异分析原始模型及检验')]:
             if key=='abundance_run' and record['action']!='differential': continue
             if key=='lefse_run' and record['action']!='lefse-render': continue
             if key=='diversity_run' and record['action']!='diversity-render': continue
+            if key=='differential_run' and record['action']!='differential-render': continue
             value=dependencies.get(key)
             if not value: continue
             dependency=Path(value)

@@ -689,6 +689,59 @@ def render_saved_diversity(job,c):
     (run/'complete.json').write_text(json.dumps({'statistics_refit':False,'diversity_run':str(analysis)}),encoding='utf8')
     job.update(step='按当前分组顺序与配色重绘完成',result={'diversity_run':str(analysis),'group_style':style,'statistics_refit':False})
 
+def differential_gallery(run):
+    figures=[]
+    for filename in sorted(Path(run).glob('02_differential/L*/abundance/abundance_heatmap.png')):
+        folder=filename.parent
+        figures.append({'level':folder.parent.name,**{kind+'_'+ext:str(folder/('abundance_'+kind+'.'+ext))
+                       for kind in ('heatmap','bubble') for ext in ('png','svg') if (folder/('abundance_'+kind+'.'+ext)).is_file()}})
+    return figures
+
+def render_saved_differential(job,c):
+    from differential_analysis import plot_options
+    analysis=approved_run(c.get('differential_run',''))
+    source_file=analysis/'differential_options.json'
+    if not source_file.is_file(): raise ValueError('请选择差异分析结果目录，不能使用预处理目录')
+    source=json.loads(source_file.read_text(encoding='utf8'))
+    if source.get('method') not in ('ancombc2','qiime_ancom'): raise ValueError('所选结果不是支持的差异分析方法')
+    if source['method']=='ancombc2' and not list((analysis/'02_differential').glob('L*/ancombc2_fit.rds')):
+        raise ValueError('所选目录没有成功保存的 ANCOM-BC2 模型；请先完成一次差异分析')
+    if source['method']=='qiime_ancom' and not list((analysis/'02_differential').glob('L*/ancom_results.tsv')):
+        raise ValueError('所选目录没有保存的 QIIME ANCOM 检验结果')
+    for entry in source['tables']:
+        filename=approved_file(entry['counts_tsv'])
+        if entry.get('counts_sha256') and hashlib.sha256(filename.read_bytes()).hexdigest()!=entry['counts_sha256']:
+            raise ValueError('保存的差异分析计数已改变，不能与旧模型混用')
+    metadata=approved_file(source['metadata_tsv'])
+    if source.get('metadata_sha256') and hashlib.sha256(metadata.read_bytes()).hexdigest()!=source['metadata_sha256']:
+        raise ValueError('保存的差异分析分组已改变，不能与旧模型混用')
+    previous=json.loads((analysis/'parameters.json').read_text(encoding='utf8'))
+    parent=approved_run(previous['preprocess']); saved=previous['config']
+    style=resolve_group_style(c,saved['samples'],fallback=source.get('group_style',saved))
+    presentation=plot_options(c,fallback=source)
+    config=dict(saved,**style,font=c.get('font') or source.get('font') or saved.get('font','sans'))
+    options=dict(source,**presentation,group_style=style,font=config['font'],analysis_run=str(analysis),statistics_refit=False)
+    output=analysis/'03_replots'; output.mkdir(exist_ok=True)
+    run=output/('figures_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]);run.mkdir();marker(run)
+    job.update(run=str(run),log=str(run/'workflow.log'))
+    save_group_style(run,style)
+    (run/'parameters.json').write_text(json.dumps({'extension':'differential-render','preprocess':str(parent),'differential_run':str(analysis),'config':config,'extension_parameters':dict(c,differential_run=str(analysis)),'statistics_refit':False},ensure_ascii=False,indent=2),encoding='utf8')
+    options_file=run/'differential_options.json'; options_file.write_text(json.dumps(options,ensure_ascii=False,indent=2),encoding='utf8')
+    begin_stage(job,'02_differential','差异菌热图、气泡图及已保存两两比较重绘',{'statistics_refit':False,'group_style':style,**presentation})
+    summary_file=run/'02_differential'/'summary.json'
+    try:
+        command(job,r_command(config,str(ROOT/'differential_ancombc.R'),'--plot-ancom',str(options_file),str(run)),run,process_env=r_execution_env(config))
+    except RuntimeError:
+        if summary_file.is_file():
+            result=json.loads(summary_file.read_text(encoding='utf8'))
+            job['result']=dict(result,differential_run=str(analysis),differential_figures=differential_gallery(run),statistics_refit=False)
+        raise
+    if not summary_file.is_file(): raise ValueError('R 命令结束但没有生成差异菌绘图摘要')
+    result=json.loads(summary_file.read_text(encoding='utf8'))
+    finish_stage(job,result,['图片来自原始模型保存的检验结果与未抽平计数；改变颜色、顺序或图示范围不重新拟合。'])
+    (run/'complete.json').write_text(json.dumps({'statistics_refit':False,'differential_run':str(analysis)}),encoding='utf8')
+    job.update(step='差异菌两两比较、丰度热图与气泡图重绘完成',result=dict(result,differential_run=str(analysis),differential_figures=differential_gallery(run),statistics_refit=False))
+
 def extension(job,c,kind):
     """Add analyses to a completed run without reprocessing FASTQ or overwriting it."""
     c={key:value for key,value in c.items() if value is not None and str(value).strip()!=''}
@@ -729,7 +782,7 @@ def extension(job,c,kind):
     elif kind=='differential':
         from differential_analysis import run_differential
         result=run_differential(job,c,saved,parent,api)
-        if result is not None: job['result']=result
+        if result is not None: job['result']=dict(result,differential_run=str(run),differential_figures=differential_gallery(run))
     elif kind=='lefse':
         from lefse_analysis import run_lefse
         result=run_lefse(job,c,saved,parent,api)
@@ -758,6 +811,7 @@ def worker(job,action,c):
         elif action=='preprocess': preprocess(job,c)
         elif action=='diversity': diversity(job,c)
         elif action=='diversity-render': render_saved_diversity(job,c)
+        elif action=='differential-render': render_saved_differential(job,c)
         elif action in ('abundance','differential','lefse','lefse-render','functional'): extension(job,c,action)
         if action in ('inspect','preflight'): save_check_results(job,c,action)
         job['status']='done'
@@ -844,7 +898,7 @@ class Handler(BaseHTTPRequestHandler):
                     except ProcessLookupError: pass
                 self.send({'ok':True}); return
             action=self.path.removeprefix('/api/')
-            if action not in ('preflight','inspect','quality','recommend','preprocess','diversity','diversity-render','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
+            if action not in ('preflight','inspect','quality','recommend','preprocess','diversity','diversity-render','differential-render','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
             self.send({'id':launch(action,c)})
         except Exception as e: self.send({'error':str(e)},400)
 

@@ -18,6 +18,34 @@ REFERENCES = {
 }
 
 
+def plot_options(config, fallback=None):
+    fallback = fallback or {}
+    defaults = {'diff_comparisons': 'all_pairs', 'diff_heatmap_scale': 'relative_abundance',
+                'heatmap_low': '#2166AC', 'heatmap_mid': '#F7F7F7', 'heatmap_high': '#B2182B',
+                'bubble_color_mode': 'abundance', 'bubble_low': '#E8F1FA', 'bubble_high': '#2166AC',
+                'diff_plot_top_n': 30}
+    values = {key: config.get(key, fallback.get(key, default)) for key, default in defaults.items()}
+    for key, allowed in [('diff_comparisons', ('all_pairs', 'reference')),
+                         ('diff_heatmap_scale', ('row_zscore', 'relative_abundance')),
+                         ('bubble_color_mode', ('abundance', 'group'))]:
+        if values[key] not in allowed:
+            raise ValueError('差异菌绘图选项无效：' + key)
+    import re
+    for key in ('heatmap_low', 'heatmap_mid', 'heatmap_high', 'bubble_low', 'bubble_high'):
+        if not isinstance(values[key], str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', values[key]):
+            raise ValueError('热图和气泡图颜色必须使用 #RRGGBB：' + key)
+        values[key] = values[key].upper()
+    raw = values['diff_plot_top_n']
+    try:
+        if isinstance(raw, bool) or str(int(raw)) != str(raw): raise ValueError()
+        values['diff_plot_top_n'] = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError('差异菌展示数量必须是整数') from None
+    if not 1 <= values['diff_plot_top_n'] <= 200:
+        raise ValueError('差异菌展示数量应为 1 至 200')
+    return values
+
+
 def options(config, samples):
     method = config.get('diff_method', '').strip()
     if method not in METHODS:
@@ -73,6 +101,7 @@ def options(config, samples):
                        'reference_group_note': 'ANCOM is an omnibus Group test; reference choice is not applied',
                        'pseudocount': 1, 'seed': None, 'iter_control': None,
                        'em_control': None, 'mdfdr_control': None})
+    values.update(plot_options(config))
     return values
 
 
@@ -221,6 +250,7 @@ def run_differential(job, config, saved, parent, api):
             writer = csv.writer(stream, delimiter='\t')
             writer.writerow(['FeatureID', *ids]); writer.writerows(features)
         entries.append({'level': level, 'name': LEVEL_NAMES[level], 'counts_tsv': str(canonical),
+                        'counts_sha256': hashlib.sha256(canonical.read_bytes()).hexdigest(),
                         'counts_qza': str(source['qza']), 'source_run': source['source_run'],
                         'source_sha256': source.get('source_sha256'),
                         'feature_count': len(features), 'sample_count': len(ids)})
@@ -233,7 +263,7 @@ def run_differential(job, config, saved, parent, api):
                  'global': len(groups) > 2 if opts['method'] == 'ancombc2' else True,
                  'pairwise': len(groups) > 2 if opts['method'] == 'ancombc2' else False,
                  'group_sizes': groups, 'excluded_samples': excluded,
-                 'metadata_tsv': str(metadata), 'tables': entries,
+                 'metadata_tsv': str(metadata), 'metadata_sha256': hashlib.sha256(metadata.read_bytes()).hexdigest(), 'tables': entries,
                  'font': config.get('font') or saved.get('font', 'sans')})
     options_file = run / 'differential_options.json'
     options_file.write_text(json.dumps(opts, ensure_ascii=False, indent=2), encoding='utf8')
