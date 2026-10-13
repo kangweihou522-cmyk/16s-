@@ -1,9 +1,9 @@
 # Windows downloads the checked source bundle; WSL imports it without network.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$targetCommit = '25ba337bbf5b6455e30167172c5ff108c9e27620'
-$expectedHash = 'edcb71d3ee6d42348d1c4dd4e48baef356017dd8f53d69fb1e55342af19b6d07'
-$bundleUrl = 'https://raw.githubusercontent.com/kangweihou522-cmyk/16s-/main/updates/group-style-25ba337.bundle'
+$targetCommit = '7febb3ecee31ddffc6412cc91202b8c4add04162'
+$expectedHash = '9b3b3c3f4cd2b54bf894864e1b11c5ade31401340c5c870290af9f9009add0cc'
+$bundleUrl = 'https://raw.githubusercontent.com/kangweihou522-cmyk/16s-/main/updates/workstation-7febb3e.bundle'
 $repoPath = '/root/16S-workstation-v02'
 $fixedBlob = '2d9a9dc77f0396de12094f288304846928dc06b4'
 $originalBlob = 'd01f90d35d6aa8812d86bb9ca1f44d3469d49c84'
@@ -37,7 +37,7 @@ try {
     }
     $head = Read-Wsl @('git', '-C', $repoPath, 'rev-parse', 'HEAD')
     if ($head -ne $targetCommit) {
-        Write-Host 'Downloading the 40 KB source update using Windows...'
+        Write-Host 'Downloading the checked source update using Windows...'
         Invoke-WebRequest -UseBasicParsing -Uri $bundleUrl -OutFile $bundleFile -Proxy 'http://127.0.0.1:10808' -TimeoutSec 30
         if ((Get-FileHash -LiteralPath $bundleFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedHash) {
             throw 'Update checksum mismatch; no source was changed.'
@@ -73,7 +73,7 @@ try {
             throw 'Source revision verification failed.'
         }
     }
-    Write-Host 'Source revision verified: 25ba337. Starting the workstation...'
+    Write-Host 'Source revision verified: 7febb3e. Starting the workstation...'
 } finally {
     if (Test-Path -LiteralPath $bundleFile) { Remove-Item -LiteralPath $bundleFile -Force }
 }
