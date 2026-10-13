@@ -66,8 +66,8 @@ plot_defaults <- list(
              show_points=TRUE,show_letters=TRUE,show_outliers=FALSE,plot_type='boxplot'),
   beta=list(width=NULL,height=NULL,title='',x_label='',y_label='',point_size=NULL,point_alpha=NULL,
             show_ellipse=TRUE,ellipse_level=.95,ellipse_alpha=.15,show_sample_labels=FALSE,show_stats=TRUE,panel_columns=2),
-  taxonomy=list(width=NULL,height=NULL,title='',x_label='',y_label='',top_n=15,levels=list(2,6),
-                view='both',bar_width=.85,palette='original'))
+  taxonomy=list(width=NULL,height=NULL,title='',x_label='',y_label='',top_n=20,top_mode='by_rank',levels=list(2,3,4,5,6),
+                view='both',bar_width=.85,palette='user_R'))
 plot_settings <- plot_defaults
 requested_settings <- list()
 if (file.exists(settings_file)) {
@@ -128,7 +128,9 @@ setting_number('beta','panel_columns',1,4,integer=TRUE)
 setting_number('taxonomy','top_n',1,100,integer=TRUE)
 setting_number('taxonomy','bar_width',.1,1)
 setting_choice('taxonomy','view',c('both','sample','group'))
-setting_choice('taxonomy','palette',c('original','Dark 3','Set 2','Viridis'))
+taxonomy_palettes <- jsonlite::read_json(file.path(dirname(normalizePath(script)),'taxonomy_palettes.json'))
+setting_choice('taxonomy','palette',names(taxonomy_palettes))
+setting_choice('taxonomy','top_mode',c('by_rank','custom','all'))
 tax_levels <- unlist(plot_settings$taxonomy$levels,use.names=FALSE)
 if (!is.numeric(tax_levels) || !length(tax_levels) || anyNA(tax_levels) || any(!tax_levels %in% 2:7) || anyDuplicated(tax_levels)) stop('Invalid plot setting: taxonomy.levels')
 value_or <- function(x,default) if (is.null(x)) default else x
@@ -355,44 +357,70 @@ if (want_profile('taxonomy') && file.exists(tf) && file.exists(tx)) {
   counts <- counts[,valid,drop=FALSE]; pmd <- pmd[valid,,drop=FALSE]
   composition_style <- resolve_group_style(unique(pmd$Group),requested_style)
   pmd$Group <- factor(pmd$Group,levels=composition_style$group_order)
-  lineage <- tax$Taxon[match(tbl[[1]],tax$FeatureID)]; split_tax <- strsplit(ifelse(is.na(lineage),'',lineage),';',fixed=TRUE)
+  source(file.path(dirname(normalizePath(script)),'taxonomy_plot.R'),encoding='UTF-8')
+  lineage <- tax$Taxon[match(tbl[[1]],tax$FeatureID)]
   rank_names <- c('kingdom','phylum','class','order','family','genus','species')
-  rank_prefix <- c('k','p','c','o','f','g','s')
   if (!is.null(plot_target)) tax_levels <- match(sub('^taxonomy/([^_]+)_.*$','\\1',plot_target$stem),rank_names)
-  for (rank in tax_levels) {
+  for (rank in if (is.null(plot_target)) 2:7 else tax_levels) {
     rank_name <- rank_names[rank]
-    labels <- vapply(split_tax,function(v) {
-      hit <- grep(paste0('^\\s*(',rank_prefix[rank],'__|D_',rank-1,'__)'),v)
-      z <- if (length(hit)==1) trimws(v[hit]) else if (length(v)>=rank) trimws(v[rank]) else ''
-      z <- sub('^([A-Za-z]|D_[0-9]+)__[[:space:]]*','',z)
-      if (!nzchar(z) || tolower(z) %in% c('unassigned','uncultured','unknown')) 'Unclassified' else z
-    },character(1))
-    summed <- rowsum(counts,labels,reorder=FALSE); rel <- sweep(summed,2,colSums(summed),'/')
+    cleaned <- taxonomy_clean_counts(counts,lineage,rank); rel <- cleaned$relative
+    clean_dir <- file.path(out,'taxonomy','cleaned_tables',paste0('L',rank,'_',rank_name))
+    dir.create(clean_dir,recursive=TRUE,showWarnings=FALSE)
+    for (table_name in c('counts','relative')) {
+      table <- data.frame(FeatureID=rownames(cleaned[[table_name]]),cleaned[[table_name]],check.names=FALSE)
+      csv(table,file.path(clean_dir,paste0(table_name,'_cleaned.csv')))
+      utils::write.table(table,file.path(clean_dir,paste0(table_name,'_cleaned.tsv')),sep='\t',row.names=FALSE,quote=FALSE)
+    }
+    csv(data.frame(FeatureID=tbl[[1]],original_lineage=lineage,cleaned_taxon=cleaned$labels),file.path(clean_dir,'taxonomy_cleaning_mapping.csv'))
+    jsonlite::write_json(list(level=rank,source='filtered_unrarefied',input_features=nrow(counts),
+      cleaned_features=nrow(rel),per_sample_counts=as.list(colSums(counts)),
+      per_sample_relative_sums=as.list(colSums(rel)),others_features=sum(cleaned$labels=='Others'),
+      normalization='per-sample original filtered totals; group means give each sample equal weight',
+      aggregation='requested rank name; missing or uncertain target rank becomes Others; originals retained'),
+      file.path(clean_dir,'report.json'),pretty=TRUE,auto_unbox=TRUE)
+    writeLines(c('清洗按当前层级的名称进行；未明确注释归为 Others，同名分类累加。',
+      'counts_cleaned 保留未抽平整数计数；relative_cleaned 每列以该样本完整计数为分母重新计算。',
+      'mapping 保存原 ASV 与原谱系，合并不会改变各样本的总 reads。',
+      '完整清洗表中的 Others 仅为未识别分类；Top N 绘图表的 Others 还包括未入选的已识别分类。',
+      '清洗表用于描述性丰度展示；ANCOM-BC2 继续使用完整谱系的未抽平计数，不把 Others 当作一个菌。'),
+      file.path(clean_dir,'说明.md'),useBytes=TRUE)
     csv(data.frame(Taxon=rownames(rel),rel,check.names=FALSE),file.path(out,'taxonomy',paste0(rank_name,'_sample_relative_abundance_unrarefied.csv')))
     all_long <- data.frame(Taxon=rep(rownames(rel),times=ncol(rel)),Abundance=as.vector(rel),Group=rep(pmd$Group,each=nrow(rel)))
     csv(stats::aggregate(Abundance~Taxon+Group,all_long,mean),file.path(out,'taxonomy',paste0(rank_name,'_group_mean_unrarefied.csv')))
-    kept <- head(names(sort(rowMeans(rel),decreasing=TRUE)),taxonomy_options$top_n); plot_rel <- rel[kept,,drop=FALSE]
-    rest <- setdiff(rownames(rel),kept); if (length(rest)) plot_rel <- rbind(plot_rel,Other=colSums(rel[rest,,drop=FALSE]))
+    if (!rank %in% tax_levels) next
+    selection <- taxonomy_top_table(rel,rank,taxonomy_options); plot_rel <- selection$relative
+    plot_taxa <- rownames(plot_rel)
+    fill_colors <- taxonomy_fill_colors(plot_taxa,taxonomy_options$palette,taxonomy_palettes)
+    suffix <- if (is.null(selection$limit)) 'all' else paste0('top',selection$limit)
+    csv(data.frame(Taxon=plot_taxa,plot_rel,check.names=FALSE),file.path(out,'taxonomy',paste0(rank_name,'_sample_',suffix,'_plot_input.csv')))
+    csv(data.frame(Taxon=plot_taxa,bottom_to_top=seq_along(plot_taxa),color=unname(fill_colors)),file.path(out,'taxonomy',paste0(rank_name,'_taxon_colors.csv')))
     long <- data.frame(Taxon=rep(rownames(plot_rel),times=ncol(plot_rel)),SampleID=rep(colnames(plot_rel),each=nrow(plot_rel)),Abundance=as.vector(plot_rel),Group=rep(pmd$Group,each=nrow(plot_rel)))
     sample_order <- pmd$SampleID[order(pmd$Group,seq_len(nrow(pmd)))]
     long$SampleID <- factor(long$SampleID,levels=sample_order); means <- stats::aggregate(Abundance~Taxon+Group,long,mean)
-    csv(means,file.path(out,'taxonomy',paste0(rank_name,'_group_mean_top',taxonomy_options$top_n,'_plot_input.csv')))
+    means <- means[order(means$Group,match(means$Taxon,plot_taxa)),,drop=FALSE]
+    csv(means,file.path(out,'taxonomy',paste0(rank_name,'_group_mean_',suffix,'_plot_input.csv')))
+    jsonlite::write_json(list(level=rank,palette=taxonomy_options$palette,top_mode=taxonomy_options$top_mode,
+      top_n=selection$limit,ranking=selection$ranking,bottom_to_top=as.list(plot_taxa),
+      colors=as.list(fill_colors),others_includes=as.list(selection$other_taxa),
+      value_unit='fraction (0 to 1); plot axis formatted as percent',grouping='saved metadata SampleID/Group',
+      known_palette_extension='finite palettes retain first colors; extra taxa use HCL Dark 3; Others always #857D83'),
+      file.path(out,'taxonomy',paste0(rank_name,'_plot_report.json')),pretty=TRUE,auto_unbox=TRUE,null='null')
     views <- switch(taxonomy_options$view,both=c('sample','group_mean'),sample='sample',group='group_mean')
     if (!is.null(plot_target)) views <- if (grepl('_group_mean_unrarefied$',plot_target$stem)) 'group_mean' else 'sample'
     for (kind in views) {
       dat <- if (kind=='sample') long else means; dat$Label <- if (kind=='sample') dat$SampleID else factor(dat$Group,levels=composition_style$group_order)
+      dat$Taxon <- factor(dat$Taxon,levels=plot_taxa)
       markers <- unique(dat[c('Label','Group')])
       markers$Group <- factor(markers$Group,levels=composition_style$group_order)
-      p <- ggplot2::ggplot(dat,ggplot2::aes(Label,Abundance,fill=Taxon))+ggplot2::geom_col(width=taxonomy_options$bar_width)+
+      p <- ggplot2::ggplot(dat,ggplot2::aes(Label,Abundance,fill=Taxon))+ggplot2::geom_col(position=ggplot2::position_stack(reverse=TRUE),width=taxonomy_options$bar_width)+
         ggplot2::geom_point(data=markers,ggplot2::aes(x=Label,y=-.035,color=Group),inherit.aes=FALSE,shape=15,size=3)+
         ggplot2::scale_color_manual(values=composition_style$group_colors,breaks=composition_style$group_order)+
-        ggplot2::scale_y_continuous(breaks=seq(0,1,.2))+theme_base()+
+        ggplot2::scale_fill_manual(values=fill_colors,breaks=plot_taxa,drop=FALSE)+
+        ggplot2::scale_y_continuous(breaks=seq(0,1,.2),labels=function(x) paste0(round(x*100),'%'))+theme_base()+
         ggplot2::theme(axis.text.x=ggplot2::element_text(angle=45,hjust=1))+ggplot2::labs(title=paste(rank_name,'composition (unrarefied filtered table)'),
-          subtitle=if (kind=='sample') paste0('Top ',taxonomy_options$top_n,' taxa + Other; each sample normalized to 1') else paste0('Mean of per-sample relative abundances; top ',taxonomy_options$top_n,' + Other'),x='',y='Relative abundance',color='Group',fill='Taxon')
-      if (taxonomy_options$palette!='original') {
-        taxa <- sort(unique(as.character(dat$Taxon)))
-        p <- p + ggplot2::scale_fill_manual(values=setNames(grDevices::hcl.colors(length(taxa),taxonomy_options$palette),taxa))
-      }
+          subtitle=paste0(if (is.null(selection$limit)) 'All identified taxa' else paste0('Top ',selection$limit,' identified taxa'),
+            ' + Others; ',if (kind=='sample') 'per-sample relative abundance' else 'mean of per-sample relative abundances'),
+          x='',y='Relative abundance (%)',color='Group',fill='Taxon')
       p <- apply_plot_settings(p,'taxonomy',rank=rank_name)
       save_plot(p,paste0('taxonomy/',rank_name,'_',kind,'_unrarefied'),max(8,min(20,nlevels(dat$Label)*.5+4)),6,'taxonomy')
     }

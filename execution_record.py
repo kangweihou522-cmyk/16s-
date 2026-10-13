@@ -41,6 +41,7 @@ def prepare_execution(job, root, action, config, runtime):
         ('depth_advice.py', '依据过滤后样本计数推荐抽平深度，另附曲线诊断。'),
         ('group_style.py', '统一的分组名称、显示顺序和十六进制配色；不改变统计设计。'),
         ('plot_settings.py', '各图种的尺寸、字号、显示和导出参数；不重算统计结果。'),
+        ('taxonomy_palettes.json', '分类柱图内置配色，包括用户 R 配色和常用分类色。'),
         ('figure_editor.py', '读取已出图的实际参数，选择单张图片从缓存重绘、保存预览与原图关系。'),
         ('abundance_tables.py', 'ASV 与 L2–L7 计数、相对丰度和分类注释导出。'),
         ('differential_analysis.py', '门到属的 ANCOM-BC2 / QIIME ANCOM 差异分析编排。'),
@@ -48,7 +49,7 @@ def prepare_execution(job, root, action, config, runtime):
         ('functional_prediction.py', 'PICRUSt2、NSTI 与用户 KO 数据库注释和层级汇总。'),
         ('execution_record.py', '记录实际执行命令、参数及源码文本。'),
     ]:
-        capture_source(job, Path(root) / name, 'Python', explanation)
+        capture_source(job, Path(root) / name, 'JSON' if name.endswith('.json') else 'Python', explanation)
 
 
 def capture_r_sources(job, args, cwd=None):
@@ -67,6 +68,8 @@ def capture_r_sources(job, args, cwd=None):
     capture_source(job, script, 'R', '本次 Rscript 实际调用的完整脚本；参数见命令记录。')
     if script.name != 'render.R':
         return
+    capture_source(job, script.with_name('taxonomy_plot.R'), 'R', '按目标层级清洗与合并 Others，选择 Top N 和分类配色。')
+    capture_source(job, script.with_name('taxonomy_palettes.json'), 'JSON', 'render.R 本次读取的分类调色板定义。')
     custom = values[index + 4] if len(values) > index + 4 else ''
     assets = Path(custom) if custom else script.parent / 'plots'
     if not assets.is_absolute():
@@ -164,7 +167,7 @@ def finalize_execution(job):
         filename = artifact_path(run, logical)
         if filename.is_file():
             lines.extend(['\n# 本次文件：' + str(filename), filename.read_text(encoding='utf-8-sig')])
-    for category in ['R', 'Python']:
+    for category in ['R', 'Python', 'JSON']:
         text = source_text(record['sources'], category)
         if category == 'R' and not text.strip():
             text = '# 本任务没有实际调用 R 脚本。\n'

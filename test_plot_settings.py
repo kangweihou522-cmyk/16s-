@@ -22,7 +22,7 @@ class PlotSettingsTests(unittest.TestCase):
         self.assertIsNone(result['alpha']['point_size'])
         self.assertEqual(json.dumps([saved, request, DEFAULTS]), before)
         result['taxonomy']['levels'].append(7)
-        self.assertEqual(DEFAULTS['taxonomy']['levels'], [2, 6])
+        self.assertEqual(DEFAULTS['taxonomy']['levels'], [2, 3, 4, 5, 6])
         self.assertEqual(request['plot_settings']['taxonomy']['levels'], [2, 7])
         self.assertIsNone(resolve_plot_settings({})['general']['dpi'])
         self.assertIsNone(resolve_plot_settings({'plot_settings': {'heatmap': {'width': ''}}})['heatmap']['width'])

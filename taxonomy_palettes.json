@@ -1,0 +1,11 @@
+{
+  "user_R": {"label": "你的 R 配色（20 色）", "colors": ["#575A8F", "#E78AC3", "#A6D854", "#FFD92F", "#8DA0CB", "#FC8D62", "#66C2A5", "#75AADB", "#FFFF99", "#CAB2D6", "#FDBF6F", "#FB9A99", "#B2DF8A", "#A6CEE3", "#B15928", "#6A3D9A", "#FF7F00", "#33A02C", "#1F78B4", "#E31A1C"]},
+  "Tableau 20": {"label": "Tableau 20 · 多分类", "colors": ["#1F77B4", "#AEC7E8", "#FF7F0E", "#FFBB78", "#2CA02C", "#98DF8A", "#D62728", "#FF9896", "#9467BD", "#C5B0D5", "#8C564B", "#C49C94", "#E377C2", "#F7B6D2", "#7F7F7F", "#C7C7C7", "#BCBD22", "#DBDB8D", "#17BECF", "#9EDAE5"]},
+  "Paired": {"label": "ColorBrewer Paired · 成对色", "colors": ["#A6CEE3", "#1F78B4", "#B2DF8A", "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00", "#CAB2D6", "#6A3D9A", "#FFFF99", "#B15928"]},
+  "Set 2": {"label": "ColorBrewer Set2 · 柔和", "colors": ["#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F", "#E5C494", "#B3B3B3"]},
+  "Set 3": {"label": "ColorBrewer Set3 · 浅色", "colors": ["#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3", "#FDB462", "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD", "#CCEBC5", "#FFED6F"]},
+  "Okabe-Ito": {"label": "Okabe–Ito · 色觉友好（8 色）", "colors": ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"]},
+  "Dark 3": {"label": "HCL Dark 3 · 鲜明", "mode": "hcl", "colors": ["#E16A86", "#C7821C", "#909800", "#00AD9A", "#9183E6"]},
+  "Viridis": {"label": "Viridis · 连续渐变", "mode": "hcl", "colors": ["#440154", "#3B528B", "#21918C", "#5EC962", "#FDE725"]},
+  "original": {"label": "旧版 ggplot2 默认色", "mode": "hue", "colors": ["#F8766D", "#B79F00", "#00BA38", "#00BFC4", "#619CFF", "#F564E3"]}
+}

@@ -2,11 +2,13 @@
 
 ``run_abundance(job, saved, api)`` receives the caller's app module so this
 module can also be used on completed historical runs without importing app.
-QIIME performs collapse and normalization; Python only validates and exports.
+QIIME performs raw collapse and normalization. Python also exports cleaned
+target-rank summaries, retaining the original tables for downstream analysis.
 """
 import csv
 import hashlib
 import json
+import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -14,6 +16,11 @@ from pathlib import Path
 LEVELS = ((2, 'phylum'), (3, 'class'), (4, 'order'), (5, 'family'),
           (6, 'genus'), (7, 'species'))
 TABLE_HEADERS = {'#OTU ID', '#Feature ID', 'Feature ID', 'feature-id', 'FeatureID'}
+RANK_PREFIXES = {2: 'p', 3: 'c', 4: 'o', 5: 'f', 6: 'g', 7: 's'}
+RANK_PATTERN = re.compile(r'^(?:([dkpcofgs])__|D_([0-6])__)', re.IGNORECASE)
+UNCERTAIN_TAXON = re.compile(
+    r'incertae[\s_-]*sedis|no[\s_-]*rank|uncultured|unclassified|unassigned|'
+    r'unknown|unidentified|unresolved|ambiguous[\s_-]*taxa', re.IGNORECASE)
 
 
 def read_table(filename, *, relative=False):
@@ -105,6 +112,96 @@ def write_table_pair(directory, stem, table, *, annotations=None):
 def table_totals(table):
     samples, _, values = table
     return {sid: sum(row[index] for row in values) for index, sid in enumerate(samples)}
+
+
+def _target_rank(lineage, level):
+    """Read only the requested rank, including QIIME's D_0__ nomenclature."""
+    parts = [part.strip() for part in lineage.split(';')]
+    prefixed = [(part, RANK_PATTERN.match(part)) for part in parts]
+    targets = [part[match.end():].strip() for part, match in prefixed
+               if match is not None and
+               ((match.group(1) or '').lower() == RANK_PREFIXES[level] or
+                match.group(2) == str(level - 1))]
+    if len(targets) > 1:
+        raise ValueError('分类谱系的目标层级重复：' + lineage)
+    target = targets[0] if targets else None
+    if target is None:
+        return '', 'Others', 'missing_rank'
+    if not target:
+        return target, 'Others', 'empty_rank'
+    if (UNCERTAIN_TAXON.search(target) or
+            target.lower() in {'na', 'n/a', 'nan', 'none', 'null', 'missing',
+                               'other', 'others', 'not assigned', 'not_assigned'}):
+        return target, 'Others', 'uncertain_rank'
+    return target, target, 'retained'
+
+
+def clean_taxonomy_table(counts, level):
+    """Return cleaned counts, relative values, lineage mapping and a report.
+
+    ``counts`` is the (samples, features, integer rows) tuple from ``read_table``.
+    ``level`` is 2–7. Features contain taxonomy lineages. Only the requested
+    rank determines uncertainty; identical retained target names are summed,
+    even across different parents, with every source lineage in the mapping.
+    Input objects are untouched. Zero-total samples have all-zero relative
+    values and are explicitly listed in the JSON-safe report.
+    """
+    if level not in RANK_PREFIXES:
+        raise ValueError('分类清理仅支持 L2–L7')
+    samples, features, values = counts
+    if (not samples or len(set(samples)) != len(samples) or
+            len(features) != len(values) or not features):
+        raise ValueError('分类计数表的样本或特征维度无效')
+    grouped, source_counts, mapping = {}, {}, []
+    reason_counts = {}
+    for lineage, row in zip(features, values):
+        if len(row) != len(samples) or any(value < 0 or int(value) != value for value in row):
+            raise ValueError('分类清理需要非负整数计数，且列数必须匹配样本')
+        target, cleaned, reason = _target_rank(lineage, level)
+        grouped.setdefault(cleaned, [0] * len(samples))
+        grouped[cleaned] = [total + int(value) for total, value in zip(grouped[cleaned], row)]
+        source_counts[cleaned] = source_counts.get(cleaned, 0) + 1
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        mapping.append({'original_lineage': lineage, 'target_taxon': target,
+                        'cleaned_taxon': cleaned, 'reason': reason})
+    # Keep the original encounter order; reserve the final row for Others.
+    labels = [label for label in grouped if label != 'Others']
+    if 'Others' in grouped:
+        labels.append('Others')
+    cleaned_counts = (list(samples), labels, [grouped[label] for label in labels])
+    totals = table_totals(cleaned_counts)
+    if totals != table_totals(counts):
+        raise ValueError('分类清理后样本计数总和发生变化')
+    relative = (list(samples), list(labels),
+                [[Decimal(value) / Decimal(totals[sid]) if totals[sid] else Decimal(0)
+                  for sid, value in zip(samples, row)] for row in cleaned_counts[2]])
+    report = {'level': level, 'name': dict(LEVELS)[level],
+              'input_feature_count': len(features), 'cleaned_feature_count': len(labels),
+              'reason_counts': reason_counts, 'per_sample_counts': totals,
+              'per_sample_relative_sums': {sid: float(value) for sid, value in table_totals(relative).items()},
+              'zero_count_samples': [sid for sid in samples if not totals[sid]],
+              'others_per_sample_counts': dict(zip(samples, grouped.get('Others', [0] * len(samples)))),
+              'merged_taxa': {label: number for label, number in source_counts.items() if number > 1},
+              'aggregation': 'sum counts by target-rank label; preserve original lineages in mapping',
+              'normalization': 'cleaned counts / per-sample total; zero-total samples remain zero'}
+    return cleaned_counts, relative, mapping, report
+
+
+def export_clean_taxonomy(directory, counts, level):
+    """Write additional clean tables and audit files without touching raw files."""
+    cleaned, relative, mapping, report = clean_taxonomy_table(counts, level)
+    counts_paths = write_table_pair(directory, 'counts_cleaned', cleaned)
+    relative_paths = write_table_pair(directory, 'relative_cleaned', relative)
+    mapping_paths = {}
+    header = ['original_lineage', 'target_taxon', 'cleaned_taxon', 'reason']
+    for extension, delimiter in (('tsv', '\t'), ('csv', ',')):
+        target = Path(directory) / ('taxonomy_cleaning_mapping.' + extension)
+        write_rows(target, header, [[row[key] for key in header] for row in mapping], delimiter=delimiter)
+        mapping_paths[extension] = target
+    report_path = Path(directory) / 'taxonomy_cleaning_report.json'
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf8')
+    return {'counts': counts_paths, 'relative': relative_paths, 'mapping': mapping_paths,
+            'report': report_path, 'feature_count': len(cleaned[1])}
 
 
 def validate_relative(counts, relative):
@@ -231,11 +328,17 @@ def run_abundance(job, saved, api, *, source_run=None):
             raise ValueError('分类折叠后的样本或序列总数发生变化：L' + str(level))
         paths = write_table_pair(target, 'counts', collapsed_counts)
         relative_qza, relative_biom, _, relative_paths = _relative(job, saved, api, collapsed, target, collapsed_counts)
+        cleaned = export_clean_taxonomy(target, collapsed_counts, level)
         levels.append({'level': level, 'name': name, 'feature_count': len(collapsed_counts[1]),
                        'counts_qza': relative_path(collapsed), 'counts_qzv': relative_path(visualization),
                        'counts_biom': relative_path(biom), 'counts': pair_paths(paths),
                        'relative_qza': relative_path(relative_qza), 'relative_biom': relative_path(relative_biom),
-                       'relative': pair_paths(relative_paths)})
+                       'relative': pair_paths(relative_paths),
+                       'cleaned': {'counts': pair_paths(cleaned['counts']),
+                                   'relative': pair_paths(cleaned['relative']),
+                                   'mapping': pair_paths(cleaned['mapping']),
+                                   'report': relative_path(cleaned['report']),
+                                   'feature_count': cleaned['feature_count']}})
     barplot_export = _export(job, saved, api, barplot_qzv, directory / 'taxa_barplot_data')
     barplot_files = [relative_path(filename) for filename in sorted(barplot_export.rglob('*')) if filename.is_file()]
     if not barplot_files:
@@ -253,5 +356,6 @@ def run_abundance(job, saved, api, *, source_run=None):
     (directory / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf8')
     api.finish_stage(job, summary, ['所有计数与相对丰度来自过滤后未抽平表，不改动原始数据或过滤规则。',
                                    '分类注释按 FeatureID 严格匹配；CSV 使用标准引号保留分类名称中的逗号。',
+                                   '各层级另存清理表：仅按目标层级判断未知分类并合并为 Others，同名分类求和后重新计算相对丰度；原始表保留。',
                                    'QIIME taxa collapse 使用原分类 QZA；官方动作忽略不在过滤后表中的额外分类条目。'])
     return manifest

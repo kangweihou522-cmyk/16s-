@@ -4,6 +4,7 @@ import json
 import math
 from pathlib import Path
 
+TAXONOMY_PALETTES = json.loads(Path(__file__).with_name('taxonomy_palettes.json').read_text(encoding='utf8'))
 GENERAL = {'dpi': None, 'font_family': 'original', 'base_size': None, 'title_size': None, 'axis_text_size': None,
            'legend_text_size': None, 'legend_position': 'original', 'theme': 'original',
            'background': 'white', 'show_caption': True, 'formats': 'original'}
@@ -15,8 +16,8 @@ DEFAULTS = {
     'beta': {**COMMON, 'point_size': None, 'point_alpha': None, 'show_ellipse': True,
              'ellipse_level': .95, 'ellipse_alpha': .15, 'show_sample_labels': False,
              'show_stats': True, 'panel_columns': 2},
-    'taxonomy': {**COMMON, 'top_n': 15, 'levels': [2, 6], 'view': 'both',
-                 'bar_width': .85, 'palette': 'original'},
+    'taxonomy': {**COMMON, 'top_n': 20, 'top_mode': 'by_rank', 'levels': [2, 3, 4, 5, 6], 'view': 'both',
+                 'bar_width': .85, 'palette': 'user_R'},
     'heatmap': {**COMMON, 'label_size': None, 'row_order': 'abundance', 'show_values': False},
     'bubble': {**COMMON, 'max_size': None, 'point_alpha': .9, 'show_values': False},
     'effect': {**COMMON, 'point_size': None, 'show_errorbars': True},
@@ -43,7 +44,8 @@ ENUMS = {
     'legend_position': ('original', 'right', 'bottom', 'none'),
     'theme': ('original', 'classic', 'minimal', 'bw'), 'background': ('white', 'transparent'),
     'formats': ('original', 'png_svg', 'png_svg_pdf'), 'plot_type': ('boxplot', 'violin'),
-    'view': ('both', 'sample', 'group'), 'palette': ('original', 'Dark 3', 'Set 2', 'Viridis'),
+    'view': ('both', 'sample', 'group'), 'palette': tuple(TAXONOMY_PALETTES),
+    'top_mode': ('by_rank', 'custom', 'all'),
     'row_order': ('abundance', 'alphabetical'), 'orientation': ('horizontal', 'vertical'),
 }
 
@@ -117,7 +119,7 @@ def ui_schema():
               'show_ellipse': '显示置信椭圆', 'ellipse_level': '椭圆置信水平', 'ellipse_alpha': '椭圆填充透明度',
               'show_sample_labels': '显示样本 ID', 'show_stats': '显示已保存的检验注释',
               'panel_columns': 'PCoA 合图列数', 'top_n': '最多展示数量', 'levels': '分类层级（可多选）',
-              'view': '展示单位', 'bar_width': '柱体宽度', 'palette': '分类单元配色',
+              'view': '展示单位', 'bar_width': '柱体宽度', 'palette': '分类配色方案', 'top_mode': '分类展示范围',
               'label_size': '菌名标签字号', 'row_order': '菌名行顺序', 'show_values': '显示平均相对丰度数值（%）',
               'max_size': '最大气泡大小', 'show_errorbars': '显示原始模型 SE 误差线',
               'feature_font_size': '菌名标签字号', 'class_font_size': '分组图例字号',
@@ -129,7 +131,8 @@ def ui_schema():
                'transparent': '透明', 'png_svg': 'PNG + SVG', 'png_svg_pdf': 'PNG + SVG + PDF',
                'boxplot': '箱线图', 'violin': '小提琴图', 'both': '样本图及分组图',
                'sample': '每个样本', 'group': '分组均值', 'abundance': '平均丰度从高到低',
-               'alphabetical': '按菌名排序', 'horizontal': '横向', 'vertical': '纵向'}
+               'alphabetical': '按菌名排序', 'horizontal': '横向', 'vertical': '纵向',
+               'by_rank': '按层级默认：目/科/属 Top20，其余全部', 'custom': '自定义 Top N + Others', 'all': '全部分类 + Others'}
     rows=[]
     for profile, defaults in DEFAULTS.items():
         fields=[]
@@ -138,9 +141,12 @@ def ui_schema():
             if isinstance(default,bool): field['type']='checkbox'
             elif key in ENUMS:
                 field.update(type='select',options=[{'value':v,'label':choices.get(v,v)} for v in ENUMS[key]])
+                if key=='palette':
+                    field['options']=[{'value':v,'label':p['label'],'colors':p['colors']} for v,p in TAXONOMY_PALETTES.items()]
             elif key in RANGES:
                 lo,hi,whole=RANGES[key]
                 if profile=='lefse_bar' and key=='top_n': lo,hi=0,300;field['label']='最多显示菌数（0 表示全部）'
+                if profile=='taxonomy' and key=='top_n': field['label']='自定义 Top N（展示范围选自定义时生效）'
                 field.update(type='number',min=lo,max=hi,step=1 if whole else 'any',nullable=default is None)
             elif key=='levels':
                 field.update(type='levels',options=[{'value':v,'label':'L'+str(v)+' '+name} for v,name in zip(range(2,8),('门','纲','目','科','属','种'))])

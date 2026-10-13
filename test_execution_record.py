@@ -46,6 +46,8 @@ elif '--json' in sys.argv:
         for name in ['qiime2_io.R','plot_alpha_original_style.R','plot_beta_original_style.R']:
             (assets/name).write_text('# custom executed asset '+name+'\n',encoding='utf8')
         script=self.root/'render.R';script.write_text('# rendering version BEFORE run\n',encoding='utf8')
+        (self.root/'taxonomy_plot.R').write_text('# taxonomy helper BEFORE run\n')
+        (self.root/'taxonomy_palettes.json').write_text('{"fixture_palette": ["#123456"]}')
         job={'id':'testactual','status':'running','action':'preprocess'}
         def workflow(job,config):
             self.attach_run(job,{'trunc_f':275,'threads':1})
@@ -55,6 +57,8 @@ elif '--json' in sys.argv:
             app.begin_stage(job,'04_R_figures','R 绘图',{'font':self.config['font']})
             app.command(job,app.r_command(self.config,str(script),str(self.run),self.config['font'],str(self.root),str(assets)),self.run,process_env=app.r_execution_env())
             script.write_text('# rendering version AFTER run\n')
+            (self.root/'taxonomy_plot.R').write_text('# taxonomy helper AFTER run\n')
+            (self.root/'taxonomy_palettes.json').write_text('{"fixture_palette": ["#654321"]}')
             (assets/'qiime2_io.R').write_text('# later modified asset\n')
             app.finish_stage(job)
         with patch.object(app,'preprocess',side_effect=workflow):app.worker(job,'preprocess',{'trunc_f':'auto'})
@@ -66,6 +70,9 @@ elif '--json' in sys.argv:
         self.assertIn('状态：done；退出码：0',report)
         r_source=(self.report(job).parent/'R完整代码.txt').read_text(encoding='utf8')
         self.assertIn('BEFORE run',r_source);self.assertNotIn('AFTER run',r_source)
+        self.assertIn('taxonomy helper BEFORE run',r_source)
+        self.assertIn('"fixture_palette": ["#123456"]',report)
+        self.assertNotIn('"fixture_palette": ["#654321"]',report)
         self.assertIn('custom executed asset qiime2_io.R',r_source);self.assertNotIn('later modified asset',r_source)
         self.assertIn('def preprocess(',report);self.assertNotIn(app.TOKEN,report)
         parameters=json.loads((self.report(job).parent/'本次参数.txt').read_text())
