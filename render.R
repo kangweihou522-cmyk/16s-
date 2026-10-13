@@ -1,6 +1,6 @@
 # Render saved QIIME outputs only: no rarefaction, ordination, or tests rerun in R.
 args <- commandArgs(trailingOnly=TRUE)
-if (!length(args)) stop('Usage: Rscript render.R RUN_DIR FONT [PREPROCESS_DIR] [PLOTS_DIR] [GROUP_STYLE_JSON] [OUTPUT_DIR] [PLOT_SETTINGS_JSON]')
+if (!length(args)) stop('Usage: Rscript render.R RUN_DIR FONT [PREPROCESS_DIR] [PLOTS_DIR] [GROUP_STYLE_JSON] [OUTPUT_DIR] [PLOT_SETTINGS_JSON] [PLOT_TARGET_JSON]')
 run <- normalizePath(args[1], mustWork=TRUE)
 font <- if (length(args)>1) args[2] else 'DejaVu Serif'
 parent <- if (length(args)>2) normalizePath(args[3], mustWork=TRUE) else dirname(run)
@@ -45,6 +45,20 @@ if (length(args)>4 && nzchar(args[5]) && !file.exists(style_file)) stop('Group s
 requested_style <- if (file.exists(style_file)) jsonlite::read_json(style_file,simplifyVector=FALSE) else NULL
 settings_file <- if (length(args)>6 && nzchar(args[7])) args[7] else file.path(run,'plot_settings.json')
 if (length(args)>6 && nzchar(args[7]) && !file.exists(settings_file)) stop('Plot settings JSON is missing: ',settings_file)
+plot_target <- NULL
+if (length(args)>7 && nzchar(args[8])) {
+  if (!file.exists(args[8])) stop('Plot target JSON is missing: ',args[8])
+  plot_target <- jsonlite::read_json(args[8],simplifyVector=FALSE)
+  patterns <- c(alpha='^alpha/(observed_features|shannon|evenness|faith_pd|chao1|simpson|goods_coverage)$',
+                beta='^beta/PCoA_(weighted_unifrac|unweighted_unifrac|bray_curtis|jaccard|four_metrics)$',
+                taxonomy='^taxonomy/(phylum|class|order|family|genus|species)_(sample|group_mean)_unrarefied$')
+  if (!is.list(plot_target) || !is.character(plot_target$profile) || length(plot_target$profile)!=1 ||
+      !plot_target$profile %in% names(patterns) || !is.character(plot_target$stem) || length(plot_target$stem)!=1 ||
+      !grepl(patterns[[plot_target$profile]],plot_target$stem)) stop('Invalid single-figure plot target.')
+}
+want_profile <- function(profile) is.null(plot_target) || identical(plot_target$profile,profile)
+want_figure <- function(stem,profile) is.null(plot_target) || (identical(plot_target$profile,profile) && identical(plot_target$stem,stem))
+figures <- list()
 plot_defaults <- list(
   general=list(dpi=NULL,base_size=NULL,title_size=NULL,axis_text_size=NULL,legend_text_size=NULL,
                legend_position='original',theme='original',background='white',show_caption=TRUE,formats='original',font_family='original'),
@@ -141,7 +155,9 @@ match_md <- function(ids) {
   d <- md[match(ids,md$SampleID),,drop=FALSE]; d$Group <- droplevels(factor(d$Group,levels=groups)); d
 }
 save_plot <- function(p,name,w,h,profile=NULL) {
-  if (!is.null(profile)) {
+  if (is.null(profile) && startsWith(name,'beta/')) profile <- 'beta'
+  if (!want_figure(name,profile)) return(invisible(NULL))
+  if (!is.null(profile) && name!='beta/PCoA_four_metrics') {
     w <- value_or(plot_settings[[profile]]$width,w)
     h <- value_or(plot_settings[[profile]]$height,h)
   }
@@ -150,6 +166,8 @@ save_plot <- function(p,name,w,h,profile=NULL) {
   if (general$formats!='png_svg') ggplot2::ggsave(paste0(f,'.pdf'),p,width=w,height=h,device=grDevices::cairo_pdf,family=font,bg=general$background)
   else unlink(paste0(f,'.pdf'))
   ggplot2::ggsave(paste0(f,'.png'),p,width=w,height=h,dpi=value_or(general$dpi,300),type='cairo',bg=general$background)
+  formats <- if (general$formats=='png_svg') c('png','svg') else c('png','svg','pdf')
+  figures[[length(figures)+1L]] <<- list(stem=name,profile=profile,files=as.list(paste0(name,'.',formats)))
 }
 apply_plot_settings <- function(p,profile,metric='',rank='') {
   options <- plot_settings[[profile]]
@@ -186,7 +204,8 @@ theme_base <- function() ggplot2::theme_minimal(base_size=14,base_family=font)+
   ggplot2::theme(panel.grid=ggplot2::element_blank(),panel.border=ggplot2::element_rect(color='black',fill=NA),axis.text=ggplot2::element_text(face='bold'),axis.title=ggplot2::element_text(face='bold'),strip.background=ggplot2::element_rect(fill='gray80',color='black'))
 alpha_titles <- c(observed_features='Observed features',shannon='Shannon diversity',evenness='Pielou evenness',faith_pd='Faith phylogenetic diversity',chao1='Chao1 richness',simpson='Simpson diversity',goods_coverage="Good's coverage")
 alpha <- list(); annotations <- list(); overall <- list(); pairwise <- list(); alpha_ids <- NULL
-for (metric in names(alpha_titles)) {
+alpha_metrics <- if (!want_profile('alpha')) character() else if (is.null(plot_target)) names(alpha_titles) else sub('^alpha/','',plot_target$stem)
+for (metric in alpha_metrics) {
   f <- result_path(run,'exports','alpha',metric,'alpha-diversity.tsv')
   if (!file.exists(f)) stop('Required alpha export missing: ',metric,' (',f,'). Export the saved QIIME result before rendering.')
   v <- tab(f); if (ncol(v)!=2) stop('Invalid alpha vector: ',f)
@@ -266,7 +285,9 @@ read_dm <- function(f,ids) {
 }
 titles <- c(weighted_unifrac='Weighted UniFrac',unweighted_unifrac='Unweighted UniFrac',bray_curtis='Bray-Curtis',jaccard='Jaccard')
 plots <- list(); beta_stats <- list(); beta_ids <- NULL
-for (metric in names(titles)) {
+combined_target <- is.null(plot_target) || identical(plot_target$stem,'beta/PCoA_four_metrics')
+beta_metrics <- if (!want_profile('beta')) character() else if (combined_target) names(titles) else sub('^beta/PCoA_','',plot_target$stem)
+for (metric in beta_metrics) {
   f <- result_path(run,'exports','pcoa',metric,'ordination.txt')
   if (!file.exists(f)) { note(paste('PCoA export missing:',metric)); next }
   ord <- read_ord(f); d <- match_md(ord$ids)
@@ -300,17 +321,23 @@ for (metric in names(titles)) {
   csv(pts,file.path(out,'beta',paste0(metric,'_PCoA_coordinates.csv')))
   csv(data.frame(Axis=paste0('PC',seq_along(ord$proportion)),ProportionExplained=ord$proportion),file.path(out,'beta',paste0(metric,'_PCoA_axes.csv')))
 }
-if (length(plots)) {
+if (length(plots) && combined_target) {
   columns <- beta_options$panel_columns
   combined <- patchwork::wrap_plots(plots,ncol=columns)
   if (general$background=='transparent') combined <- combined + patchwork::plot_annotation(
     theme=ggplot2::theme(plot.background=ggplot2::element_rect(fill='transparent',color=NA)))
-  save_plot(combined,'beta/PCoA_four_metrics',value_or(beta_options$width,6)*columns,value_or(beta_options$height,5)*ceiling(length(plots)/columns))
+  combined_width <- value_or(beta_options$width,6)*columns
+  combined_height <- value_or(beta_options$height,5)*ceiling(length(plots)/columns)
+  if (!is.null(plot_target)) {
+    combined_width <- value_or(beta_options$width,6*columns)
+    combined_height <- value_or(beta_options$height,5*ceiling(length(plots)/columns))
+  }
+  save_plot(combined,'beta/PCoA_four_metrics',combined_width,combined_height,'beta')
 }
 if (length(beta_stats)) csv(do.call(rbind,beta_stats),file.path(out,'beta','beta_QIIME_overall_saved.csv'))
 # Composition uses filtered UNRAREFIED counts and each sample's relative abundance.
 tf <- result_path(parent,'exported-table','feature-table.tsv'); tx <- result_path(parent,'exported-taxonomy','taxonomy.tsv')
-if (file.exists(tf) && file.exists(tx)) {
+if (want_profile('taxonomy') && file.exists(tf) && file.exists(tx)) {
   lines <- readLines(tf,warn=FALSE,encoding='UTF-8'); h <- which(grepl('^(#OTU ID|#?Feature ID|#?feature-id)\t',lines))
   if (length(h)!=1) stop('Cannot find BIOM TSV header.')
   tbl <- utils::read.delim(text=paste(lines[h:length(lines)],collapse='\n'),check.names=FALSE,colClasses='character',quote='',comment.char='')
@@ -331,6 +358,7 @@ if (file.exists(tf) && file.exists(tx)) {
   lineage <- tax$Taxon[match(tbl[[1]],tax$FeatureID)]; split_tax <- strsplit(ifelse(is.na(lineage),'',lineage),';',fixed=TRUE)
   rank_names <- c('kingdom','phylum','class','order','family','genus','species')
   rank_prefix <- c('k','p','c','o','f','g','s')
+  if (!is.null(plot_target)) tax_levels <- match(sub('^taxonomy/([^_]+)_.*$','\\1',plot_target$stem),rank_names)
   for (rank in tax_levels) {
     rank_name <- rank_names[rank]
     labels <- vapply(split_tax,function(v) {
@@ -350,6 +378,7 @@ if (file.exists(tf) && file.exists(tx)) {
     long$SampleID <- factor(long$SampleID,levels=sample_order); means <- stats::aggregate(Abundance~Taxon+Group,long,mean)
     csv(means,file.path(out,'taxonomy',paste0(rank_name,'_group_mean_top',taxonomy_options$top_n,'_plot_input.csv')))
     views <- switch(taxonomy_options$view,both=c('sample','group_mean'),sample='sample',group='group_mean')
+    if (!is.null(plot_target)) views <- if (grepl('_group_mean_unrarefied$',plot_target$stem)) 'group_mean' else 'sample'
     for (kind in views) {
       dat <- if (kind=='sample') long else means; dat$Label <- if (kind=='sample') dat$SampleID else factor(dat$Group,levels=composition_style$group_order)
       markers <- unique(dat[c('Label','Group')])
@@ -368,14 +397,17 @@ if (file.exists(tf) && file.exists(tx)) {
       save_plot(p,paste0('taxonomy/',rank_name,'_',kind,'_unrarefied'),max(8,min(20,nlevels(dat$Label)*.5+4)),6,'taxonomy')
     }
   }
-} else note('Taxonomy exports unavailable; composition plots omitted.')
+} else if (want_profile('taxonomy')) note('Taxonomy exports unavailable; composition plots omitted.')
+if (!is.null(plot_target) && length(figures)!=1L) stop('The requested cached figure could not be produced: ',plot_target$stem)
 writeLines(unique(notes),file.path(out,'render_notes.txt'),useBytes=TRUE)
 writeLines(capture.output(sessionInfo()),file.path(out,'R_sessionInfo.txt'))
 requested_settings[names(plot_settings)] <- plot_settings
 jsonlite::write_json(list(original_assets=original,font=font,source='saved_QIIME2_outputs',input_run=run,
                          group_style=list(group_order=as.list(style$group_order),group_colors=as.list(style$group_colors)),
                          plot_settings=requested_settings,
+                         plot_target=plot_target,figures=figures,
                          notes=unique(notes)),file.path(out,'render_summary.json'),auto_unbox=TRUE,pretty=TRUE,null='null')
+jsonlite::write_json(list(figures=figures),file.path(out,'figure_manifest.json'),auto_unbox=TRUE,pretty=TRUE)
 files <- list.files(out,recursive=TRUE,full.names=TRUE)
 index_root <- if (length(args)>5 && nzchar(args[6])) out else run
 utils::write.table(data.frame(path=substring(files,nchar(index_root)+2),bytes=file.info(files)$size),file.path(out,'results.tsv'),sep='\t',row.names=FALSE,quote=FALSE)

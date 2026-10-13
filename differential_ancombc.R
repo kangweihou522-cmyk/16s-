@@ -156,6 +156,47 @@ diff_plot_font <- function(opts) {
   selected
 }
 
+differential_figures <- list()
+validate_diff_target <- function(target) {
+  if (is.null(target)) return(invisible(TRUE))
+  suffix <- c(heatmap='abundance/abundance_heatmap', bubble='abundance/abundance_bubble',
+              effect='(comparisons/pair_[0-9]{3}/effect|ancom_W)')
+  if (!is.list(target) || !is.character(target$profile) || length(target$profile)!=1L ||
+      !target$profile %in% names(suffix) || !is.character(target$stem) || length(target$stem)!=1L ||
+      !grepl(paste0('^02_differential/L[2-7]_[a-z]+/',suffix[[target$profile]],'$'),target$stem))
+    stop('Invalid single differential figure target')
+  if (!is.null(target$comparison_key) && (!identical(target$profile,'effect') ||
+      !is.character(target$comparison_key) || length(target$comparison_key)!=1L || is.na(target$comparison_key) ||
+      !nzchar(target$comparison_key))) stop('Invalid selected original comparison key')
+  invisible(TRUE)
+}
+
+diff_relative_stem <- function(opts, stem) {
+  root <- opts$plot_output_run
+  if (is.null(root) || !startsWith(stem,paste0(root,'/'))) return(stem)
+  substring(stem,nchar(root)+2L)
+}
+
+diff_target_wanted <- function(opts, stem, profile) {
+  target <- opts$plot_target
+  is.null(target) || (identical(target$profile,profile) && identical(target$stem,diff_relative_stem(opts,stem)))
+}
+
+diff_target_tables <- function(opts) {
+  validate_diff_target(opts$plot_target)
+  if (is.null(opts$plot_target)) return(opts)
+  level <- strsplit(opts$plot_target$stem,'/',fixed=TRUE)[[1]][2]
+  keep <- vapply(opts$tables,function(entry) identical(paste0('L',entry$level,'_',entry$name),level),logical(1))
+  if (sum(keep)!=1L) stop('Requested figure level is absent from the original saved analysis')
+  opts$tables <- opts$tables[keep]
+  opts
+}
+
+write_diff_figure_manifest <- function(run, target=NULL) {
+  if (!is.null(target) && length(differential_figures)!=1L) stop('The requested cached differential figure could not be produced: ',target$stem)
+  jsonlite::write_json(list(figures=differential_figures),file.path(run,'figure_manifest.json'),pretty=TRUE,auto_unbox=TRUE)
+}
+
 diff_label <- function(value, rank, comparison) {
   gsub('{comparison}', comparison, gsub('{rank}', rank, value, fixed = TRUE), fixed = TRUE)
 }
@@ -200,6 +241,7 @@ style_differential_figure <- function(fig, config, font = 'sans', rank = '', com
 
 save_differential_figure <- function(fig, stem, width = 12, height = 5, opts = NULL,
                                      profile = 'effect', rank = '', comparison = '') {
+  if (!diff_target_wanted(opts,stem,profile)) return(character())
   dir.create(dirname(stem), recursive = TRUE, showWarnings = FALSE)
   config <- diff_plot_config(opts, profile); general <- config$general
   font <- diff_plot_font(opts)
@@ -230,6 +272,9 @@ save_differential_figure <- function(fig, stem, width = 12, height = 5, opts = N
   jsonlite::write_json(list(requested = config$requested, effective = effective), paste0(stem, '_plot_settings.json'),
                        pretty = TRUE, auto_unbox = TRUE, null = 'null')
   attr(files, 'plot_settings') <- effective
+  relative <- diff_relative_stem(opts,stem)
+  differential_figures[[length(differential_figures)+1L]] <<- list(stem=relative,profile=profile,
+                                                                  files=as.list(paste0(relative,'.',formats)))
   files
 }
 
@@ -352,6 +397,9 @@ plot_actual_comparison <- function(dat, folder, contrast, style, opts) {
 }
 
 plot_abundance_views <- function(counts, meta, findings, folder, opts, title) {
+  want_heat <- diff_target_wanted(opts,file.path(folder,'abundance_heatmap'),'heatmap')
+  want_bubble <- diff_target_wanted(opts,file.path(folder,'abundance_bubble'),'bubble')
+  if (!want_heat && !want_bubble) return(list(plots=character()))
   opts$font <- diff_plot_font(opts)
   dir.create(folder, recursive = TRUE, showWarnings = FALSE)
   if (!identical(colnames(counts), rownames(meta)) || any(colSums(counts) <= 0)) stop('Abundance counts and actual sample metadata must align with nonzero libraries')
@@ -384,9 +432,14 @@ plot_abundance_views <- function(counts, meta, findings, folder, opts, title) {
   zero_note <- if (any(selection$structural_zero)) '[SZ] marks an official structural-zero presence/absence finding in at least one requested pair. Its LFC/SE/p/q are not estimated; known TRUE vs FALSE is required, not TRUE vs TRUE or missing flags.' else ''
   if (!nrow(selected)) {
     empty <- data.frame(taxon = character(), Group = character(), mean_relative_abundance = numeric(), mean_percent = numeric(), row_zscore = numeric())
-    write_result(empty, file.path(folder, 'heatmap_plot_input.tsv')); write_result(empty, file.path(folder, 'bubble_plot_input.tsv'))
-    heat <- empty_differential_figure(paste(title, 'abundance heatmap'), 'No official differential findings selected. No nonsignificant or synthetic taxa were substituted.', opts$font)
-    bubble <- empty_differential_figure(paste(title, 'abundance bubble plot'), 'No official differential findings selected. No nonsignificant or synthetic taxa were substituted.', opts$font)
+    if (want_heat) {
+      write_result(empty,file.path(folder,'heatmap_plot_input.tsv'))
+      heat <- empty_differential_figure(paste(title, 'abundance heatmap'), 'No official differential findings selected. No nonsignificant or synthetic taxa were substituted.', opts$font)
+    }
+    if (want_bubble) {
+      write_result(empty,file.path(folder,'bubble_plot_input.tsv'))
+      bubble <- empty_differential_figure(paste(title, 'abundance bubble plot'), 'No official differential findings selected. No nonsignificant or synthetic taxa were substituted.', opts$font)
+    }
   } else {
     values <- means[selected$taxon, , drop = FALSE]; sd <- apply(values, 1L, stats::sd)
     z <- sweep(sweep(values, 1L, rowMeans(values), '-'), 1L, ifelse(is.finite(sd) & sd > 0, sd, 1), '/')
@@ -402,12 +455,15 @@ plot_abundance_views <- function(counts, meta, findings, folder, opts, title) {
     heat_order <- if (heat_config$profile$row_order == 'alphabetical') sort(selected$taxon) else selected$taxon
     heat_long <- long; heat_long$plot_y <- length(heat_order) - match(heat_long$taxon, heat_order) + 1L
     heat_labels <- labels[match(heat_order, selected$taxon)]
-    write_result(heat_long, file.path(folder, 'heatmap_plot_input.tsv')); write_result(long, file.path(folder, 'bubble_plot_input.tsv'))
+    if (want_heat) write_result(heat_long,file.path(folder,'heatmap_plot_input.tsv'))
+    if (want_bubble) write_result(long,file.path(folder,'bubble_plot_input.tsv'))
     markers <- data.frame(Group = factor(style$group_order, levels = style$group_order), plot_y = .15)
     common <- ggplot2::theme_bw(base_family = opts$font) + ggplot2::theme(panel.grid = ggplot2::element_blank(),
                  axis.text.y = ggplot2::element_text(size = 8), axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
     y_scale <- function(axis_labels = labels) ggplot2::scale_y_continuous(breaks = seq_len(nrow(values)), labels = rev(axis_labels),
                                                     limits = c(0, nrow(values) + .5), expand = c(0, 0))
+    value_size <- if (is.null(heat_config$general$base_size)) 3 else heat_config$general$base_size / (72.27 / 25.4)
+    if (want_heat) {
     heat_label <- if (opts$diff_heatmap_scale == 'row_zscore') 'Row Z-score of group means' else 'Group mean relative abundance (%)'
     limit <- if (opts$diff_heatmap_scale == 'row_zscore') max(1, abs(long$row_zscore)) else max(long$mean_percent)
     midpoint <- if (opts$diff_heatmap_scale == 'row_zscore') 0 else limit / 2
@@ -418,9 +474,10 @@ plot_abundance_views <- function(counts, meta, findings, folder, opts, title) {
       ggplot2::scale_color_manual(values = style$group_colors, breaks = style$group_order) + y_scale(heat_labels) + common +
       ggplot2::labs(title = paste(title, 'abundance heatmap'), x = NULL, y = NULL, fill = heat_label, color = 'Group',
                     caption = paste(strwrap(paste(note, zero_note, if (opts$diff_heatmap_scale == 'row_zscore') 'Constant rows have Z=0; Z-scores do not represent LFC or significance.' else ''), 110), collapse = '\n'))
-    value_size <- if (is.null(heat_config$general$base_size)) 3 else heat_config$general$base_size / (72.27 / 25.4)
     if (isTRUE(heat_config$profile$show_values)) heat <- heat + ggplot2::geom_text(ggplot2::aes(label = sprintf('%.2f%%', mean_percent)),
                                                                                size = value_size, family = opts$font, color = 'black')
+    }
+    if (want_bubble) {
     bubble <- ggplot2::ggplot(long, ggplot2::aes(Group, plot_y, size = mean_percent))
     if (opts$bubble_color_mode == 'group') {
       bubble <- bubble + ggplot2::geom_point(ggplot2::aes(color = Group), alpha = bubble_config$profile$point_alpha, stroke = 0) +
@@ -455,14 +512,15 @@ plot_abundance_views <- function(counts, meta, findings, folder, opts, title) {
     if (short_bubble) bubble <- bubble + ggplot2::theme(legend.position = 'bottom')
     if (isTRUE(bubble_config$profile$show_values)) bubble <- bubble + ggplot2::geom_text(
       ggplot2::aes(label = sprintf('%.2f%%', mean_percent)), size = value_size, family = opts$font, color = 'black')
+    }
   }
   lines <- if (nrow(selected)) max(lengths(strsplit(labels, '\n', fixed = TRUE))) else 1L
   height <- max(5, nrow(selected) * (.17 * lines + .12) + 2)
   rank <- if (is.null(opts$plot_rank)) '' else opts$plot_rank
-  heat_files <- save_differential_figure(heat, file.path(folder, 'abundance_heatmap'), height = height,
-                                        opts = opts, profile = 'heatmap', rank = rank, comparison = 'all groups')
-  bubble_files <- save_differential_figure(bubble, file.path(folder, 'abundance_bubble'), width = 13, height = max(8, height),
-                                          opts = opts, profile = 'bubble', rank = rank, comparison = 'all groups')
+  heat_files <- if (want_heat) save_differential_figure(heat, file.path(folder, 'abundance_heatmap'), height = height,
+                                        opts = opts, profile = 'heatmap', rank = rank, comparison = 'all groups') else character()
+  bubble_files <- if (want_bubble) save_differential_figure(bubble, file.path(folder, 'abundance_bubble'), width = 13, height = max(8, height),
+                                          opts = opts, profile = 'bubble', rank = rank, comparison = 'all groups') else character()
   files <- c(heat_files, bubble_files)
   summary <- list(selected_total = sum(selection$selected_union), model_robust_total = sum(selection$model_robust),
                    omnibus_reject_total = sum(selection$omnibus_reject),
@@ -495,12 +553,26 @@ plot_ancom_level <- function(fit, counts, meta, folder, opts, title, rank = '') 
   plan <- plan[order(match(plan$positive_group, style$group_order), match(plan$negative_group, style$group_order)), , drop = FALSE]
   plan$result_source <- result_source
   comparisons <- list(); findings <- list()
-  for (i in seq_len(nrow(plan))) {
+  pair_indices <- seq_len(nrow(plan)); target_pair <- NULL
+  if (!is.null(opts$plot_target) && identical(opts$plot_target$profile,'effect')) {
+    comparison_key <- opts$plot_target$comparison_key
+    if (is.null(comparison_key)) {
+      selected_info <- file.path(opts$analysis_run,dirname(opts$plot_target$stem),'comparison.json')
+      if (!file.exists(selected_info)) stop('The original comparison identity file is missing; refusing to substitute a different comparison')
+      comparison_key <- jsonlite::fromJSON(selected_info,simplifyVector=FALSE)$contrast
+    }
+    pair_indices <- which(plan$key==comparison_key)
+    if (length(pair_indices)!=1L) stop('Selected original comparison is not present in the saved official result plan')
+    target_pair <- basename(dirname(opts$plot_target$stem))
+  }
+  for (i in pair_indices) {
     contrast <- as.list(plan[i, , drop = FALSE])
     dat <- comparison_model_data(result, contrast, opts, result_source)
     zero <- structural_zero_data(fit, contrast, counts, meta)
     if (!is.null(zero)) dat <- rbind(dat, zero)
-    comparisons[[i]] <- plot_actual_comparison(dat, file.path(folder, 'comparisons', sprintf('pair_%03d', i)), contrast, style, opts)
+    pair_folder <- file.path(folder,'comparisons',if (is.null(target_pair)) sprintf('pair_%03d',i) else target_pair)
+    if (diff_target_wanted(opts,file.path(pair_folder,'effect'),'effect'))
+      comparisons[[length(comparisons)+1L]] <- plot_actual_comparison(dat,pair_folder,contrast,style,opts)
     selected <- dat$robust_significant | dat$source == 'structural_zero_presence_absence'
     findings[[i]] <- data.frame(taxon = dat$taxon[selected], source = dat$source[selected],
                                 comparison = rep(contrast$key, sum(selected)), stringsAsFactors = FALSE)
@@ -515,6 +587,8 @@ plot_ancom_level <- function(fit, counts, meta, folder, opts, title, rank = '') 
 }
 
 plot_qiime <- function(opts, run, source_run = run) {
+  opts$plot_output_run <- run
+  opts <- diff_target_tables(opts)
   opts <- modifyList(opts, visual_options(opts)); if (is.null(opts$font)) opts$font <- 'sans'
   opts$font <- diff_plot_font(opts)
   summaries <- list()
@@ -530,6 +604,8 @@ plot_qiime <- function(opts, run, source_run = run) {
     if (any(!is.finite(result$W))) stop('QIIME ANCOM W must be finite in official export')
     result$taxon <- result[[1]]
     result$decision <- factor(result[['Reject null hypothesis']], levels = c('False', 'True', 'FALSE', 'TRUE'))
+    files <- character()
+    if (diff_target_wanted(opts,file.path(folder,'ancom_W'),'effect')) {
     dat <- head(result[order(-result$W), , drop = FALSE], 25L)
     dat$taxon <- factor(dat$taxon, levels = rev(dat$taxon))
     fig <- ggplot2::ggplot(dat, ggplot2::aes(x = W, y = taxon, fill = decision)) +
@@ -538,6 +614,7 @@ plot_qiime <- function(opts, run, source_run = run) {
       ggplot2::theme_bw(base_family = opts$font) + ggplot2::theme(axis.text.y = ggplot2::element_text(size = 8))
     files <- save_differential_figure(fig, file.path(folder, 'ancom_W'), height = max(4, nrow(dat) * .25),
                                       opts = opts, profile = 'effect', rank = entry$name, comparison = 'omnibus ANCOM')
+    }
     counts <- read_count_input(entry$counts_tsv)
     meta <- read_group_metadata(opts$metadata_tsv, colnames(counts), opts$reference_group, unlist(opts$groups))
     if (anyDuplicated(result$taxon) || !all(result$taxon %in% rownames(counts))) stop('Official QIIME ANCOM taxon IDs do not match original counts')
@@ -546,7 +623,7 @@ plot_qiime <- function(opts, run, source_run = run) {
                             comparison = rep('omnibus_ANCOM_reject_null', sum(hit)), stringsAsFactors = FALSE)
     abundance <- plot_abundance_views(counts, meta, selected, file.path(folder, 'abundance'), opts, paste('QIIME 2 ANCOM:', entry$name))
     abundance$selection <- 'Actual official omnibus ANCOM Reject null TRUE taxa; no pairwise inference or invented p/q values'
-    jsonlite::write_json(abundance, file.path(folder, 'abundance', 'plot_summary.json'), pretty = TRUE, auto_unbox = TRUE)
+    if (length(abundance$plots)) jsonlite::write_json(abundance, file.path(folder, 'abundance', 'plot_summary.json'), pretty = TRUE, auto_unbox = TRUE)
     summaries[[length(summaries) + 1L]] <- list(level = entry$level, name = entry$name, status = 'rendered',
                                                comparisons = 'omnibus_ANCOM_only', abundance = abundance,
                                                plots = c(files, abundance$plots), statistics_refit = FALSE,
@@ -569,6 +646,10 @@ replot_saved_differential <- function(request, run) {
   if (!is.null(request$font)) opts$font <- request$font
   if (!is.null(request$plot_settings)) opts$plot_settings <- modifyList(
     if (is.null(saved$plot_settings)) list() else saved$plot_settings, request$plot_settings, keep.null = TRUE)
+  opts$plot_target <- request$plot_target
+  opts$plot_output_run <- run
+  opts$analysis_run <- source
+  opts <- diff_target_tables(opts)
   if (identical(saved$method, 'qiime_ancom')) return(plot_qiime(opts, run, source))
   if (!is.null(saved$method) && !identical(saved$method, 'ancombc2')) stop('Unsupported saved differential method')
   summaries <- list()
@@ -617,9 +698,10 @@ main <- function() {
   versions <- list(R = R.version.string, packages = as.list(vapply(required,
                     function(pkg) as.character(utils::packageVersion(pkg)), character(1))))
   jsonlite::write_json(versions, file.path(run, 'software_versions.json'), pretty = TRUE, auto_unbox = TRUE)
-  if (args[1] == '--plot-qiime') { plot_qiime(opts, run); return(invisible(TRUE)) }
-  if (args[1] == '--plot-ancom') { replot_saved_differential(opts, run); return(invisible(TRUE)) }
+  if (args[1] == '--plot-qiime') { plot_qiime(opts, run); write_diff_figure_manifest(run,opts$plot_target); return(invisible(TRUE)) }
+  if (args[1] == '--plot-ancom') { replot_saved_differential(opts, run); write_diff_figure_manifest(run,opts$plot_target); return(invisible(TRUE)) }
   if (args[1] == '--check') return(invisible(TRUE))
+  opts$plot_output_run <- run
   destination <- file.path(run, '02_differential'); dir.create(destination, showWarnings = FALSE)
   summaries <- list()
   for (entry in opts$tables) {
@@ -680,6 +762,7 @@ main <- function() {
                             failed_levels = failed, levels = summaries), file.path(destination, 'summary.json'),
                         pretty = TRUE, auto_unbox = TRUE)
   writeLines(capture.output(utils::sessionInfo()), file.path(run, 'R_session_info.txt'))
+  write_diff_figure_manifest(run)
   if (failed) stop(paste(failed, 'taxonomy level(s) failed; actual outputs and failure diagnostics are preserved'))
 }
 

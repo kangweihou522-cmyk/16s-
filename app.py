@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parent
 def module_api():
     from types import SimpleNamespace
     names=('ROOT','artifact_path','q','command','r_command','r_execution_env','find_conda','conda_cmd',
-           'path','begin_stage','finish_stage','stage_report','export_artifact','probe')
+           'path','begin_stage','finish_stage','stage_report','export_artifact','probe',
+           'approved_run','approved_file','marker','render_saved_diversity','render_saved_differential')
     return SimpleNamespace(**{name:globals()[name] for name in names})
 
 def service_identity():
@@ -698,10 +699,15 @@ def render_saved_diversity(job,c):
     job.update(run=str(run),log=str(run/'workflow.log'))
     style_file=save_group_style(run,style)
     plot_file=save_plot_settings(run,config['plot_settings'])
+    target_args=[]
+    if c.get('plot_target'):
+        target_file=run/'plot_target.json'
+        target_file.write_text(json.dumps(c['plot_target'],ensure_ascii=False,indent=2),encoding='utf8')
+        target_args=[str(target_file)]
     (run/'parameters.json').write_text(json.dumps({'extension':'diversity-render','preprocess':str(parent),'diversity_run':str(analysis),'config':config,'extension_parameters':dict(c,diversity_run=str(analysis)),'statistics_refit':False},ensure_ascii=False,indent=2),encoding='utf8')
     figure_root=run/'04_R_figures'/'R_original_style'
     begin_stage(job,'04_R_figures','仅重绘：保留原抽平、指标及统计结果',{'group_style':style,'statistics_refit':False})
-    command(job,r_command(config,str(ROOT/'render.R'),str(analysis),config['font'],str(parent),config.get('plot_scripts',''),str(style_file),str(figure_root),str(plot_file)),run,process_env=r_execution_env(config))
+    command(job,r_command(config,str(ROOT/'render.R'),str(analysis),config['font'],str(parent),config.get('plot_scripts',''),str(style_file),str(figure_root),str(plot_file),*target_args),run,process_env=r_execution_env(config))
     summary_file=figure_root/'render_summary.json'
     if not summary_file.is_file(): raise ValueError('R 绘图结束但没有生成绘图摘要')
     summary=json.loads(summary_file.read_text(encoding='utf8'))
@@ -724,6 +730,13 @@ def render_saved_differential(job,c):
     if not source_file.is_file(): raise ValueError('请选择差异分析结果目录，不能使用预处理目录')
     source=json.loads(source_file.read_text(encoding='utf8'))
     if source.get('method') not in ('ancombc2','qiime_ancom'): raise ValueError('所选结果不是支持的差异分析方法')
+    if c.get('plot_target'):
+        stem=c['plot_target'].get('stem','')
+        match=re.match(r'^02_differential/(L[2-6]_(?:phylum|class|order|family|genus))/',stem)
+        if not match: raise ValueError('单图预览的分类层级无效')
+        selected=[entry for entry in source['tables'] if f"L{entry['level']}_{entry['name']}"==match[1]]
+        if len(selected)!=1: raise ValueError('所选图片与原始分类层级记录不一致')
+        source=dict(source,tables=selected)
     if source['method']=='ancombc2' and not list((analysis/'02_differential').glob('L*/ancombc2_fit.rds')):
         raise ValueError('所选目录没有成功保存的 ANCOM-BC2 模型；请先完成一次差异分析')
     if source['method']=='qiime_ancom' and not list((analysis/'02_differential').glob('L*/ancom_results.tsv')):
@@ -741,6 +754,7 @@ def render_saved_differential(job,c):
     presentation=plot_options(c,fallback=source)
     config=dict(saved,**style,font=c.get('font') or source.get('font') or saved.get('font','sans'),plot_settings=resolve_plot_settings(c,fallback=source))
     options=dict(source,**presentation,group_style=style,plot_settings=config['plot_settings'],font=config['font'],analysis_run=str(analysis),statistics_refit=False)
+    if c.get('plot_target'): options['plot_target']=c['plot_target']
     output=analysis/'03_replots'; output.mkdir(exist_ok=True)
     run=output/('figures_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]);run.mkdir();marker(run)
     job.update(run=str(run),log=str(run/'workflow.log'))
@@ -835,6 +849,9 @@ def worker(job,action,c):
         elif action=='diversity': diversity(job,c)
         elif action=='diversity-render': render_saved_diversity(job,c)
         elif action=='differential-render': render_saved_differential(job,c)
+        elif action=='figure-render':
+            from figure_editor import render_figure
+            render_figure(job,c,module_api())
         elif action in ('abundance','differential','lefse','lefse-render','functional'): extension(job,c,action)
         if action in ('inspect','preflight'): save_check_results(job,c,action)
         job['status']='done'
@@ -877,6 +894,12 @@ class Handler(BaseHTTPRequestHandler):
             if u.path=='/api/runtime': self.send(RUNTIME)
             elif u.path=='/api/group-style': self.send(group_style_input(metadata=p.get('metadata',[None])[0],run=p.get('run',[None])[0]))
             elif u.path=='/api/plot-settings': self.send(plot_settings_input(p['run'][0]))
+            elif u.path=='/api/figures':
+                from figure_editor import figure_catalog
+                self.send(figure_catalog(p['run'][0],module_api()))
+            elif u.path=='/api/figure':
+                from figure_editor import describe_figure
+                self.send(describe_figure(p['image'][0],module_api()))
             elif u.path=='/api/status':
                 j=JOBS[p['id'][0]]; result={key:value for key,value in j.items() if not key.startswith('_')}
                 logfile=Path(j['log']); result['log_tail']=''
@@ -922,7 +945,7 @@ class Handler(BaseHTTPRequestHandler):
                     except ProcessLookupError: pass
                 self.send({'ok':True}); return
             action=self.path.removeprefix('/api/')
-            if action not in ('preflight','inspect','quality','recommend','preprocess','diversity','diversity-render','differential-render','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
+            if action not in ('preflight','inspect','quality','recommend','preprocess','diversity','diversity-render','differential-render','figure-render','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
             self.send({'id':launch(action,c)})
         except Exception as e: self.send({'error':str(e)},400)
 

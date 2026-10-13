@@ -26,6 +26,7 @@ CLI_NAMES = {
 }
 UNKNOWN = re.compile(r'(?:^|_)(?:incertae_?sedis|norank|no_rank|uncultured|unclassified|unidentified|unknown|unassigned|ambiguous|not_assigned)(?:_|$)')
 FIT_RESULT = '02_statistics/lefse_results.res'
+PLOT_TARGETS = {'lefse_bar': '03_figures/bar', 'lefse_cladogram': '03_figures/cladogram'}
 
 
 def _json(filename, value):
@@ -294,6 +295,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 folder=Path(sys.argv[1]);threshold=float(sys.argv[2]);status=sys.argv[3]
 settings=json.loads(Path(sys.argv[4]).read_text(encoding='utf8')) if len(sys.argv)>4 else {}
+target=sys.argv[5] if len(sys.argv)>5 else ''
+if target not in ('','bar','cladogram'): raise ValueError('Unknown LEfSe plot target')
 general=settings.get('general',{}); formats=('png','svg','pdf') if general.get('formats')=='png_svg_pdf' else ('png','svg')
 if general.get('base_size') is not None: matplotlib.rcParams['font.size']=general['base_size']
 if general.get('font_family','original')!='original':
@@ -302,6 +305,7 @@ if general.get('font_family','original')!='original':
     matplotlib.rcParams['font.family']=[general['font_family']]
 matplotlib.rcParams['svg.fonttype']='none'
 for kind,title in [('bar','LEfSe LDA scores'),('cladogram','LEfSe taxonomy cladogram')]:
+    if target and kind!=target: continue
     profile=settings.get('lefse_'+kind,{})
     figure,axis=plt.subplots(figsize=(profile.get('width') or 8,profile.get('height') or 4.5));axis.axis('off')
     title=(profile.get('title') or title).replace('{threshold}',str(threshold))
@@ -668,11 +672,22 @@ def run_lefse(job, config, saved, parent, api):
 def render_lefse(job, config, analysis, api):
     """Render only into the current job's isolated run, never mutate cached scores."""
     analysis, output = Path(analysis), Path(job['run'])
+    target = config.get('plot_target')
+    if target is not None and (not isinstance(target, dict) or set(target) != {'profile', 'stem'}
+            or not isinstance(target.get('profile'), str) or target.get('profile') not in PLOT_TARGETS
+            or target.get('stem') != PLOT_TARGETS.get(target.get('profile'))):
+        raise ValueError('LEfSe 单图预览目标无效；请选择原图旁的预览按钮')
+    kinds = (target['profile'][len('lefse_'):],) if target else ('bar', 'cladogram')
     marker = analysis / 'lefse_complete.json'
     if not marker.is_file():
         raise ValueError('所选 LEfSe 分析尚未完成统计')
     status = json.loads(marker.read_text(encoding='utf8'))
-    threshold = _number(config.get('lda_threshold', 2), 'LDA 阈值')
+    viewed = analysis / '03_figures/render_summary.json'
+    inherited_threshold = (json.loads(viewed.read_text(encoding='utf8')).get('lda_threshold')
+                           if viewed.is_file() else None)
+    if inherited_threshold is None:
+        inherited_threshold = status.get('settings', {}).get('lda_threshold', 2)
+    threshold = _number(config.get('lda_threshold', inherited_threshold), 'LDA 阈值')
     result_file = analysis / FIT_RESULT
     if hashlib.sha256(result_file.read_bytes()).hexdigest() != status['result_sha256']:
         raise ValueError('保存的 LEfSe 结果已被改动，不能使用旧缓存预览')
@@ -694,22 +709,23 @@ def render_lefse(job, config, analysis, api):
     if config.get('conda'):
         runtime_config['conda'] = config['conda']
     api.begin_stage(job, '03_figures', 'LEfSe：从保存分数筛选并绘图',
-                    {'lda_threshold': threshold, 'statistics_refit': False, 'plot_settings': visual, **style})
+                    {'lda_threshold': threshold, 'statistics_refit': False, 'plot_settings': visual,
+                     'plot_target': target, **style})
     folder = output / '03_figures'
     folder.mkdir(exist_ok=True)
     plot_result = folder / 'threshold_results.res'
     with plot_result.open('w', encoding='utf8', newline='') as stream:
         csv.writer(stream, delimiter='\t').writerows(filtered)
-    runtime = _runtime(job, runtime_config, api, ('bar', 'cladogram'))
+    runtime = _runtime(job, runtime_config, api, kinds)
     _json(folder / 'runtime.json', runtime)
     prefix = _prefix(runtime_config, api)
     formats = ('png', 'svg', 'pdf') if visual['general']['formats'] == 'png_svg_pdf' else ('png', 'svg')
-    figures = {kind + '_' + ext: str(folder / (kind + '.' + ext)) for kind in ('bar', 'cladogram') for ext in formats}
+    figures = {kind + '_' + ext: str(folder / (kind + '.' + ext)) for kind in kinds for ext in formats}
     top_n = visual['lefse_bar']['top_n']
     bar_selected = (sorted(selected, key=lambda row: (-abs(row['lda_score']), row['feature']))[:top_n]
                     if top_n else selected)
     bar_result = plot_result
-    if selected and top_n:
+    if selected and top_n and 'bar' in kinds:
         bar_result = folder / 'bar_display_results.res'
         with bar_result.open('w', encoding='utf8', newline='') as stream:
             csv.writer(stream, delimiter='\t').writerows(row['raw'] for row in bar_selected)
@@ -717,7 +733,7 @@ def render_lefse(job, config, analysis, api):
         class_order = ':'.join(status['groups'][group] for group in style['group_order'])
         _json(folder / 'plot_style.json', {**style, 'groups': status['groups'], 'plot_settings': visual})
         script = _script(folder / 'render_official.py', OFFICIAL_PLOT_SCRIPT, job)
-        for kind in ('bar', 'cladogram'):
+        for kind in kinds:
             for ext in formats:
                 args = prefix + ['python', script, kind, str(folder / 'plot_style.json'),
                                  str(bar_result if kind == 'bar' else plot_result), figures[kind + '_' + ext],
@@ -726,7 +742,7 @@ def render_lefse(job, config, analysis, api):
     else:
         script = _script(folder / 'render_empty.py', EMPTY_PLOT_SCRIPT, job)
         api.command(job, prefix + ['python', script, str(folder), str(threshold), status['statistics'],
-                                  str(output / 'plot_settings.json')], output)
+                                  str(output / 'plot_settings.json'), kinds[0] if target else ''], output)
     for filename in figures.values():
         path = Path(filename)
         if not path.is_file() or path.stat().st_size == 0:
@@ -736,7 +752,9 @@ def render_lefse(job, config, analysis, api):
                'result_sha256': status['result_sha256'], 'no_hits': not selected,
                'statistics_status': status['statistics'], 'plot_settings': visual,
                'bar_biomarker_count': len(bar_selected), 'bar_display_top_n': top_n,
-               'cladogram_uses_full_threshold_selection': True, **style}
+               'cladogram_uses_full_threshold_selection': True, 'plot_target': target,
+               'figure_manifest': [{'profile': 'lefse_' + kind, 'stem': '03_figures/' + kind,
+                                    **{ext: figures[kind + '_' + ext] for ext in formats}} for kind in kinds], **style}
     _json(folder / 'render_summary.json', summary)
     api.finish_stage(job, summary, ['柱图与分类层级 cladogram 来自同一份原始 LDA 缓存与当前筛选阈值。',
                                    'cladogram 表示分类注释层级，不是序列系统发育树。',

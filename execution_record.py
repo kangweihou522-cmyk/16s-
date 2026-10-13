@@ -41,6 +41,7 @@ def prepare_execution(job, root, action, config, runtime):
         ('depth_advice.py', '依据过滤后样本计数推荐抽平深度，另附曲线诊断。'),
         ('group_style.py', '统一的分组名称、显示顺序和十六进制配色；不改变统计设计。'),
         ('plot_settings.py', '各图种的尺寸、字号、显示和导出参数；不重算统计结果。'),
+        ('figure_editor.py', '读取已出图的实际参数，选择单张图片从缓存重绘、保存预览与原图关系。'),
         ('abundance_tables.py', 'ASV 与 L2–L7 计数、相对丰度和分类注释导出。'),
         ('differential_analysis.py', '门到属的 ANCOM-BC2 / QIIME ANCOM 差异分析编排。'),
         ('lefse_analysis.py', 'LEfSe 分类谱系预处理、检验和基于缓存的 LDA 阈值重绘。'),
@@ -156,7 +157,7 @@ def finalize_execution(job):
     if not record['commands']:
         lines.append('\n# 本任务未通过命令执行器运行外部命令；Python 处理及检查结果见阶段报告。')
     for logical in ['manifest.tsv', 'metadata.tsv', 'layout.json', 'differential_options.json',
-                    'lefse_parameters.json', 'group_style.json', 'plot_settings.json', '00_inputs/effective_parameters.json',
+                    'lefse_parameters.json', 'group_style.json', 'plot_settings.json', 'plot_target.json', 'figure_request.json', '00_inputs/effective_parameters.json',
                     '03_figures/render_summary.json', '10_abundance/manifest.json']:
         # Use the saved layout, preserving both organized and older flat runs.
         from run_layout import artifact_path

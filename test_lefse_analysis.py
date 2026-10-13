@@ -71,7 +71,8 @@ class SimulatedCLI:
             elif Path(tail[0]).name == 'render_empty.py':
                 settings = json.loads(Path(tail[4]).read_text()) if len(tail) > 4 else {}
                 formats = ('png', 'svg', 'pdf') if settings.get('general', {}).get('formats') == 'png_svg_pdf' else ('png', 'svg')
-                for kind in ('bar', 'cladogram'):
+                kinds = (tail[5],) if len(tail) > 5 and tail[5] else ('bar', 'cladogram')
+                for kind in kinds:
                     for ext in formats:
                         (Path(tail[1]) / (kind + '.' + ext)).write_text('SIMULATED no hits image')
             elif Path(tail[0]).name == 'render_official.py':
@@ -306,6 +307,77 @@ class LefseCacheTests(unittest.TestCase):
         self.assertTrue(all(Path(path).is_relative_to(output) for path in preview['figures'].values()))
         self.assertEqual(initial_figures, {key: Path(path).read_bytes() for key, path in original['figures'].items()})
 
+    def test_single_picture_targets_render_no_sibling_and_keep_original_fit(self):
+        original = self.fit()
+        cached = (self.run / lefse.FIT_RESULT).read_bytes()
+        marker = (self.run / 'lefse_complete.json').read_bytes()
+        original_figures = {key: Path(path).read_bytes() for key, path in original['figures'].items()}
+        for kind in ('bar', 'cladogram'):
+            with self.subTest(kind=kind):
+                output = self.run / 'renders' / ('single_' + kind)
+                output.mkdir(parents=True)
+                start = len(self.api.commands)
+                target = {'profile': 'lefse_' + kind, 'stem': '03_figures/' + kind}
+                result = lefse.render_lefse({'run': str(output)}, {'plot_target': target,
+                    'plot_settings': {'general': {'formats': 'png_svg_pdf'}, 'lefse_bar': {'top_n': 1}}}, self.run, self.api)
+                self.assertEqual(set(result['figures']), {kind + '_' + ext for ext in ('png', 'svg', 'pdf')})
+                self.assertEqual(result['plot_target'], target)
+                self.assertEqual(result['figure_manifest'][0]['profile'], target['profile'])
+                later = self.api.commands[start:]
+                self.assertEqual(len(later), 3)
+                self.assertTrue(all(Path(args[6]).name == 'render_official.py' and args[7] == kind for args in later))
+                self.assertEqual(set(json.loads(self.api.probes[-1][-1])), {kind})
+                sibling = 'cladogram' if kind == 'bar' else 'bar'
+                self.assertFalse(any((output / '03_figures').glob(sibling + '.*')))
+                if kind == 'cladogram':
+                    self.assertFalse((output / '03_figures/bar_display_results.res').exists())
+        self.assertEqual((self.run / lefse.FIT_RESULT).read_bytes(), cached)
+        self.assertEqual((self.run / 'lefse_complete.json').read_bytes(), marker)
+        self.assertEqual(original_figures, {key: Path(path).read_bytes() for key, path in original['figures'].items()})
+
+    def test_single_no_hit_picture_keeps_truthful_status_without_sibling(self):
+        self.fit()
+        output = self.run / 'renders' / 'single_nohit'
+        output.mkdir(parents=True)
+        start = len(self.api.commands)
+        target = {'profile': 'lefse_cladogram', 'stem': '03_figures/cladogram'}
+        result = lefse.render_lefse({'run': str(output)}, {'lda_threshold': 99, 'plot_target': target,
+            'plot_settings': {'general': {'formats': 'png_svg_pdf', 'show_caption': False}}}, self.run, self.api)
+        self.assertTrue(result['no_hits'])
+        self.assertEqual(set(result['figures']), {'cladogram_' + ext for ext in ('png', 'svg', 'pdf')})
+        later = self.api.commands[start:]
+        self.assertEqual(len(later), 1)
+        self.assertEqual(Path(later[0][6]).name, 'render_empty.py')
+        self.assertEqual(later[0][-1], 'cladogram')
+        self.assertFalse(any((output / '03_figures').glob('bar.*')))
+
+    def test_redraw_without_threshold_inherits_displayed_threshold(self):
+        self.fit()
+        summary_file = self.run / '03_figures/render_summary.json'
+        summary = json.loads(summary_file.read_text())
+        summary['lda_threshold'] = 3
+        summary_file.write_text(json.dumps(summary))
+        for explicit, expected in (({}, 3), ({'lda_threshold': 1}, 1)):
+            output = self.run / 'renders' / ('inherited_threshold_' + str(expected))
+            output.mkdir(parents=True)
+            result = lefse.render_lefse({'run': str(output)}, {'plot_target': {
+                'profile': 'lefse_bar', 'stem': '03_figures/bar'}, **explicit}, self.run, self.api)
+            self.assertEqual(result['lda_threshold'], expected)
+
+    def test_invalid_single_plot_targets_rejected_before_writes_or_commands(self):
+        self.fit()
+        output = self.run / 'renders' / 'invalid_target'
+        output.mkdir(parents=True)
+        start = len(self.api.commands)
+        for target in ({}, [], {'profile': ['lefse_bar'], 'stem': '03_figures/bar'},
+                       {'profile': 'lefse_bar', 'stem': '03_figures/cladogram'},
+                       {'profile': 'lefse_bar', 'stem': '../bar'},
+                       {'profile': 'lefse_bar', 'stem': '03_figures/bar', 'extra': True}):
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, '目标无效'):
+                lefse.render_lefse({'run': str(output)}, {'plot_target': target}, self.run, self.api)
+        self.assertEqual(len(self.api.commands), start)
+        self.assertEqual(list(output.iterdir()), [])
+
     def test_no_hit_renders_explicit_placeholder_without_running_official_empty_plot(self):
         self.fit()
         output = self.run / 'renders' / 'threshold_99'
@@ -432,6 +504,34 @@ class LefseCacheTests(unittest.TestCase):
         self.assertEqual(rows[1][2:4], ['', ''])
         self.assertEqual(rows[2][2:4], ['G_B', '-3'])
         self.assertEqual(results[0]['raw'][2:4], ['G_A', '2'])
+
+
+@unittest.skipUnless(importlib.util.find_spec('matplotlib'), 'Matplotlib is not installed')
+class SingleEmptyPlotTests(unittest.TestCase):
+    def test_actual_single_placeholders_only_write_target_formats_and_truthful_text(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / 'render_empty.py'
+            script.write_text(lefse.EMPTY_PLOT_SCRIPT)
+            settings = lefse.resolve_plot_settings({'plot_settings': {
+                'general': {'formats': 'png_svg_pdf', 'show_caption': False},
+                'lefse_cladogram': {'title': 'Selected tree at {threshold}'}}})
+            setting_file = root / 'settings.json'
+            setting_file.write_text(json.dumps(settings))
+            for kind in ('bar', 'cladogram'):
+                folder = root / kind
+                folder.mkdir()
+                proc = subprocess.run([sys.executable, str(script), str(folder), '99', 'executed',
+                                       str(setting_file), kind], capture_output=True, text=True, timeout=30,
+                                      env={**os.environ, 'MPLCONFIGDIR': str(root / 'matplotlib')})
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertEqual({path.name for path in folder.iterdir()}, {kind + '.' + ext for ext in ('png', 'svg', 'pdf')})
+                self.assertTrue((folder / (kind + '.pdf')).read_bytes().startswith(b'%PDF'))
+                svg = (folder / (kind + '.svg')).read_text()
+                self.assertIn('No biomarkers above LDA threshold 99.0', svg)
+                self.assertNotIn('Saved analysis; no statistical refit', svg)
+                if kind == 'cladogram':
+                    self.assertIn('Selected tree at 99.0', svg)
 
 
 @unittest.skipUnless(os.environ.get('LEFSE_OFFICIAL_PLOT_ROOT'),
