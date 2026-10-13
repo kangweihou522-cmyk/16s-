@@ -1,9 +1,9 @@
 # Windows downloads the checked source bundle; WSL imports it without network.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$targetCommit = '159bc56c7547dc1d69ed318096eec32df74ecde0'
-$expectedHash = '76e0015155886de70e7e8627a5e087fa01241bb370cd983fe070f11404e330ec'
-$bundleUrl = 'https://raw.githubusercontent.com/kangweihou522-cmyk/16s-/main/updates/workstation-159bc56.bundle'
+$targetCommit = 'cd09a85a55f9e0a2fd55383325a51640faba41ad'
+$expectedHash = 'cbc8208095a0e02335107db3efe95062e0a18e5586824f4332cb47bb6e36eae0'
+$bundleUrl = 'https://raw.githubusercontent.com/kangweihou522-cmyk/16s-/main/updates/workstation-cd09a85.bundle'
 $repoPath = '/root/16S-workstation-v02'
 $fixedBlob = '2d9a9dc77f0396de12094f288304846928dc06b4'
 $originalBlob = 'd01f90d35d6aa8812d86bb9ca1f44d3469d49c84'
@@ -73,7 +73,7 @@ try {
             throw 'Source revision verification failed.'
         }
     }
-    Write-Host 'Source revision verified: 159bc56. Starting the workstation...'
+    Write-Host 'Source revision verified: cd09a85. Starting the workstation...'
 } finally {
     if (Test-Path -LiteralPath $bundleFile) { Remove-Item -LiteralPath $bundleFile -Force }
 }
