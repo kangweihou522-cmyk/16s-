@@ -146,6 +146,80 @@ class AbundanceTablesTests(unittest.TestCase):
             write_table_pair(self.root / 'out', 'annotated', (['001'], ['ASV1'], [[1]]),
                              annotations=read_taxonomy(filename))
 
+    def test_qiime_confidence_roundoff_and_disabled_marker_are_preserved(self):
+        filename = self.root / 'taxonomy.tsv'
+        for value in ('0', '1', '0.95', '1.0000000000000002', '-2.22E-16', '-1.0', ''):
+            with self.subTest(value=value):
+                original = 'Feature ID\tTaxon\tConfidence\nASV1\tk__Bacteria\t' + value + '\n'
+                filename.write_text(original)
+                annotations = read_taxonomy(filename)
+                self.assertEqual(annotations[1]['ASV1'], ['k__Bacteria', value])
+                pair = write_table_pair(self.root / 'out', 'annotated',
+                                        (['001'], ['ASV1'], [[7]]), annotations=annotations)
+                with pair['csv'].open(newline='') as stream:
+                    self.assertEqual(list(csv.reader(stream))[1], ['ASV1', '7', 'k__Bacteria', value])
+                self.assertEqual(filename.read_text(), original)
+        for value in ('NaN', 'Infinity', '-Infinity', '-0.1', '-2', '1.01', '1.000000001', 'oops'):
+            with self.subTest(value=value):
+                filename.write_text('Feature ID\tTaxon\tConfidence\nASV1\tk__Bacteria\t' + value + '\n')
+                with self.assertRaises(ValueError):
+                    read_taxonomy(filename)
+
+    def prepare_interrupted_preprocess(self):
+        import app
+        source = self.source()
+        app.marker(source)
+        (source / 'parameters.json').write_text(json.dumps(dict(self.saved, batch_id='mouse-batch')))
+        for folder in ('04_taxonomy_filter', '05_phylogeny', '06_rarefaction'):
+            stage_report(source, folder, folder, status='done')
+        for logical in ('rooted-tree.qza', 'alpha-rarefaction.qzv'):
+            target = artifact_path(source, logical)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b'completed original artifact')
+        taxonomy = artifact_path(source, 'exported-taxonomy/taxonomy.tsv')
+        taxonomy.write_text(taxonomy.read_text().replace('0.95', '1.0000000000000002'))
+        (source / 'depth_recommendation.json').write_text('{"recommended_depth": 100}')
+        api = FakeCLI(source)
+        api.approved_run = app.approved_run
+        return source, api
+
+    def test_resume_only_abundance_completes_without_repeating_preprocessing(self):
+        import app
+        from unittest.mock import patch
+        source, api = self.prepare_interrupted_preprocess()
+        # The generated top-level processing guide gains the new stage.
+        original = {p: p.read_bytes() for p in source.rglob('*')
+                    if p.is_file() and p != source / '处理说明.md'}
+        job = {'id': 'abundance-recovery', 'action': 'resume-abundance', 'status': 'running'}
+        with patch.object(app, 'module_api', return_value=api):
+            app.worker(job, 'resume-abundance', {'result_run': str(source), 'batch_id': 'mouse-batch'})
+        self.assertEqual(job['status'], 'done', job.get('error'))
+        self.assertTrue((source / 'preprocess_complete.json').is_file())
+        self.assertEqual(job['result']['depth_advice']['recommended_depth'], 100)
+        self.assertEqual(len(job['result']['abundance']['levels']), 6)
+        self.assertTrue(job['result']['resumed_abundance'])
+        self.assertFalse(any(call[0] in ('dada2', 'phylogeny', 'diversity', 'feature-classifier') for call in api.calls))
+        self.assertTrue(list((source / '09_execution_code').glob('resume-abundance_*/完整运行代码.txt')))
+        for filename, data in original.items():
+            self.assertEqual(filename.read_bytes(), data, str(filename))
+
+    def test_resume_checks_completion_batch_and_never_marks_failed_exports_complete(self):
+        from abundance_tables import resume_abundance
+        source, api = self.prepare_interrupted_preprocess()
+        stage_report(source, '06_rarefaction', 'curves', status='failed')
+        config = {'result_run': str(source), 'batch_id': 'mouse-batch'}
+        with self.assertRaisesRegex(ValueError, '此前阶段未完成'):
+            resume_abundance({}, config, api)
+        self.assertEqual(api.calls, [])
+        stage_report(source, '06_rarefaction', 'curves', status='done')
+        with self.assertRaisesRegex(ValueError, '其他批次'):
+            resume_abundance({}, dict(config, batch_id='different-batch'), api)
+        self.assertEqual(api.calls, [])
+        api.bad_relative = True
+        with self.assertRaisesRegex(ValueError, '相对丰度与未抽平计数不一致'):
+            resume_abundance({}, config, api)
+        self.assertFalse((source / 'preprocess_complete.json').exists())
+
     def test_cleaning_aggregates_labels_conserves_counts_and_preserves_input(self):
         counts = (['001', '010,case', '007'],
                   ['k__Bacteria;p__P;f__F1;g__Shared;s__Species',

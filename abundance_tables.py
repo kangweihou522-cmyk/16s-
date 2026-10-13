@@ -78,8 +78,14 @@ def read_taxonomy(filename):
                 confidence = Decimal(row[confidence_index])
             except InvalidOperation:
                 raise ValueError('分类表 Confidence 非数值：' + row[0]) from None
-            if not confidence.is_finite() or not 0 <= confidence <= 1:
-                raise ValueError('分类表 Confidence 无效：' + row[0])
+            # q2-feature-classifier sums class probabilities (roundoff can
+            # slightly exceed 1) and writes -1 when confidence is disabled.
+            # Preserve exported text; this annotation never changes counts.
+            tolerance = Decimal('1e-12')
+            if not confidence.is_finite() or not (
+                    confidence == -1 or -tolerance <= confidence <= 1 + tolerance):
+                raise ValueError('分类表 Confidence 无效：' + row[0] +
+                                 '（值：' + row[confidence_index] + '；文件：' + str(filename) + '）')
         annotations[row[0]] = row[1:]
     return header[1:], annotations
 
@@ -356,6 +362,36 @@ def run_abundance(job, saved, api, *, source_run=None):
     (directory / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf8')
     api.finish_stage(job, summary, ['所有计数与相对丰度来自过滤后未抽平表，不改动原始数据或过滤规则。',
                                    '分类注释按 FeatureID 严格匹配；CSV 使用标准引号保留分类名称中的逗号。',
+                                   'Confidence 原值保留；容忍 1e-12 的浮点边界误差，-1 表示 QIIME 未计算置信度，不作为低置信度过滤依据。',
                                    '各层级另存清理表：仅按目标层级判断未知分类并合并为 Others，同名分类求和后重新计算相对丰度；原始表保留。',
                                    'QIIME taxa collapse 使用原分类 QZA；官方动作忽略不在过滤后表中的额外分类条目。'])
     return manifest
+
+
+def resume_abundance(job, config, api):
+    """Finish only abundance export after completed preprocessing stages."""
+    import time
+    run = api.approved_run(config.get('result_run', ''))
+    saved = json.loads((run / 'parameters.json').read_text(encoding='utf8'))
+    if saved.get('extension') or not saved.get('samples') or (run / 'preprocess_complete.json').exists():
+        raise ValueError('请选择丰度导出失败、尚未完成的预处理 run；完整历史任务请使用常规丰度导出')
+    if config.get('batch_id') and saved.get('batch_id') and config['batch_id'] != saved['batch_id']:
+        raise ValueError('结果目录属于其他批次，请先打开对应历史批次')
+    for folder in ('04_taxonomy_filter', '05_phylogeny', '06_rarefaction'):
+        report = run / folder / 'report.json'
+        if not report.is_file() or json.loads(report.read_text(encoding='utf8')).get('status') != 'done':
+            raise ValueError('此前阶段未完成，不能仅补做丰度导出：' + folder)
+    for logical in ('filtered-table.qza', 'taxonomy.qza', 'taxa-barplot.qzv',
+                    'rooted-tree.qza', 'alpha-rarefaction.qzv', 'exported-table/feature-table.tsv'):
+        filename = api.artifact_path(run, logical)
+        if not filename.is_file() or not filename.stat().st_size:
+            raise ValueError('此前结果缺失，不能补做丰度导出：' + str(filename))
+    job.update(run=str(run), log=str(run / 'workflow.log'), step='仅补做丰度导出；复用已完成的预处理')
+    abundance = run_abundance(job, saved, api)
+    result = {'abundance': abundance, 'resumed_abundance': True}
+    recommendation = run / 'depth_recommendation.json'
+    if recommendation.is_file():
+        result['depth_advice'] = json.loads(recommendation.read_text(encoding='utf8'))
+    (run / 'preprocess_complete.json').write_text(json.dumps({
+        'completed_at': time.time(), 'completion_mode': 'resumed_abundance'}), encoding='utf8')
+    job.update(result=result, step='丰度导出补做完成；可继续选择抽平深度及后续分析')

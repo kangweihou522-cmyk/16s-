@@ -883,6 +883,9 @@ def worker(job,action,c):
         elif action=='quality': preprocess(job,c,quality_only=True)
         elif action=='recommend': refresh_quality_advice(job,c)
         elif action=='preprocess': preprocess(job,c)
+        elif action=='resume-abundance':
+            from abundance_tables import resume_abundance
+            resume_abundance(job,c,module_api())
         elif action=='diversity': diversity(job,c)
         elif action=='diversity-render': render_saved_diversity(job,c)
         elif action=='differential-render': render_saved_differential(job,c)
@@ -988,7 +991,7 @@ class Handler(BaseHTTPRequestHandler):
                     except ProcessLookupError: pass
                 self.send({'ok':True}); return
             action=self.path.removeprefix('/api/')
-            if action not in ('preflight','inspect','quality','recommend','preprocess','diversity','diversity-render','differential-render','figure-render','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
+            if action not in ('preflight','inspect','quality','recommend','preprocess','resume-abundance','diversity','diversity-render','differential-render','figure-render','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
             self.send({'id':launch(action,c)})
         except Exception as e: self.send({'error':str(e)},400)
 
