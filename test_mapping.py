@@ -186,18 +186,23 @@ class ExplicitMappingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "read ID"):
             app.discover(self.config())
 
+    @staticmethod
+    def materialize(job, config, *args):
+        from test_quality_pipeline import materialize_qiime_outputs
+        materialize_qiime_outputs(job, config, *args)
+
     def test_explicit_sheet_routes_manifest_groups_and_saved_parameters(self):
         self.sheet([self.default_row()])
         config, job, calls = self.processing_config(), {}, []
         originals = {p: p.read_bytes() for p in (self.forward, self.reverse, self.meta)}
-        with patch.object(app, "q", side_effect=lambda job, c, *args: calls.append(args)), patch.object(app, "command"):
+        with patch.object(app, "q", side_effect=lambda job, c, *args: (calls.append(args), self.materialize(job, c, *args))), patch.object(app, "command"):
             app.preprocess(job, config, quality_only=True)
         run = Path(job["run"])
-        with (run / "manifest.tsv").open(encoding="utf8") as stream:
+        with (app.artifact_path(run, "manifest.tsv")).open(encoding="utf8") as stream:
             manifest = list(csv.reader(stream, delimiter="\t"))
         self.assertEqual(manifest, [["sample-id", "forward-absolute-filepath", "reverse-absolute-filepath"],
                                     ["0001", str(self.forward), str(self.reverse)]])
-        with (run / "metadata.tsv").open(encoding="utf8") as stream:
+        with (app.artifact_path(run, "metadata.tsv")).open(encoding="utf8") as stream:
             groups = list(csv.reader(stream, delimiter="\t"))
         self.assertEqual(groups, [["sample-id", "Group"], ["#q2:types", "categorical"], ["0001", "对照"]])
         saved = json.loads((run / "parameters.json").read_text(encoding="utf8"))
@@ -210,9 +215,9 @@ class ExplicitMappingTests(unittest.TestCase):
         self.sheet([("A1", "CON", self.default_row()[2], "")])
         job, calls = {}, []
         config = self.processing_config() | {"mode": "single"}
-        with patch.object(app, "q", side_effect=lambda job, c, *args: calls.append(args)), patch.object(app, "command"):
+        with patch.object(app, "q", side_effect=lambda job, c, *args: (calls.append(args), self.materialize(job, c, *args))), patch.object(app, "command"):
             app.preprocess(job, config, quality_only=True)
-        with (Path(job["run"]) / "manifest.tsv").open(encoding="utf8") as stream:
+        with (app.artifact_path(job["run"], "manifest.tsv")).open(encoding="utf8") as stream:
             self.assertEqual(list(csv.reader(stream, delimiter="\t")),
                              [["sample-id", "absolute-filepath"], ["A1", str(self.forward)]])
         imported = next(c for c in calls if c[:2] == ("tools", "import"))
@@ -223,7 +228,7 @@ class ExplicitMappingTests(unittest.TestCase):
         other_r = fastq(self.raw / "second-reverse.fastq", mate=2)
         self.sheet([self.default_row("A1"), ("B1", "处理", other_f.name, other_r.name)])
         config, job = self.processing_config(), {}
-        with patch.object(app, "q"), patch.object(app, "command"):
+        with patch.object(app, "q", side_effect=self.materialize), patch.object(app, "command"):
             app.preprocess(job, config, quality_only=True)
         run = Path(job["run"])
         inventory_before = (run / "input_inventory.json").read_bytes()

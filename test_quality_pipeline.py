@@ -170,7 +170,7 @@ class QualityPipelineTests(unittest.TestCase):
         app.worker(job, 'inspect', self.config)
         self.assertEqual(job['status'], 'done')
         report = json.loads((Path(job['run']) / '00_checks/report.json').read_text())
-        self.assertEqual(report['results']['inspection'][0]['SampleID'], '001')
+        self.assertEqual(report['results']['inspection']['samples'][0]['SampleID'], '001')
         self.assertEqual({p:p.read_bytes() for p in self.raw.iterdir()}, before)
 
     def test_single_end_runs_without_reverse_parameters(self):

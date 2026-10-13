@@ -11,6 +11,7 @@ from depth_advice import read_curves, recommend_depth
 from execution_record import prepare_execution, capture_r_sources, command_explanation, finalize_execution, now
 from group_style import resolve_group_style, save_group_style
 from plot_settings import resolve_plot_settings, save_plot_settings, ui_schema
+from sequence_structure import inspect_samples, save_report as save_sequence_report, export_clean_fastq
 
 ROOT = Path(__file__).resolve().parent
 
@@ -172,7 +173,7 @@ def find_conda(c):
 
 def conda_cmd(c):
     executable=find_conda(c)
-    env = c.get('env','').strip()
+    env = c.get('env','qiime2-amplicon-2025.7').strip()
     if not env: raise ValueError('请填写已安装的 QIIME 2 conda 环境名')
     return [executable,'run','--no-capture-output','-n',env]
 
@@ -390,17 +391,27 @@ def save_check_results(job,c,action):
         if out==raw or out in raw.parents: raise ValueError('检查结果目录不能是原始数据目录本身或其父目录')
     out.mkdir(parents=True,exist_ok=True)
     run=out/('check_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]); run.mkdir(); marker(run)
-    previous=Path(job['log'])
+    previous=Path(job.get('log',run/'workflow.log'))
     if previous.is_file(): shutil.copyfile(previous,run/'workflow.log')
     if '_execution' in job:
         (run/'commands.jsonl').write_text(''.join(json.dumps(entry,ensure_ascii=False)+'\n' for entry in job['_execution']['commands']),encoding='utf8')
     job['run']=str(run); job['log']=str(run/'workflow.log')
+    if action=='inspect' and isinstance(job.get('result'),dict) and 'samples' in job['result']:
+        save_sequence_report(run/'00_checks',job['result'])
+    (run/'parameters.json').write_text(json.dumps({'config':c},ensure_ascii=False,indent=2),encoding='utf8')
     stage_report(run,'00_checks','输入与配对检查' if action=='inspect' else '运行环境检查',results={'inspection':job.get('result')},notes=['输入检查只抽查前 1000 条 reads，不等于全文件完整性检测。' if action=='inspect' else '请查看每项 ok 状态；检查结束不表示所有依赖均通过，也不表示已分析测序数据。'])
 
 def preprocess(job,c,quality_only=False):
     plotting=resolve_plot_settings(c)
     if plotting['general']['font_family']!='original': c=dict(c,font=plotting['general']['font_family'])
     c=dict(c)
+    c.setdefault('env','qiime2-amplicon-2025.7'); c.setdefault('r_env','16s-workstation-r')
+    if c.get('input_layout')=='merged' and not quality_only:
+        raise ValueError('已提前拼接的FASTQ不能在本工作站当作真正单端执行DADA2；可检查质量，建议索取未拼接clean R1/R2')
+    data_state=c.get('data_state') or ('clean' if c.get('primer_mode')=='removed' else 'raw')
+    if data_state not in ('raw','clean','unknown'): raise ValueError('请选择原始、已clean或状态未知')
+    c['data_state']=data_state
+    c['primer_mode']='removed' if data_state=='clean' else ('auto' if c.get('primer_mode') in ('unknown','removed',None) else c['primer_mode'])
     auto=c.get('parameter_mode')=='auto'
     if auto or not str(c.get('threads','')).strip(): c['threads']=str(min(4,os.cpu_count() or 1))
     if not str(c.get('min_frequency','')).strip(): c['min_frequency']='1'
@@ -417,10 +428,18 @@ def preprocess(job,c,quality_only=False):
     elif not quality_only and not auto:
         if integer(c,'trunc_f',1,1000)<=integer(c,'trim_f',0,500): raise ValueError('截断位置须大于 trim')
     primer_mode=c.get('primer_mode')
-    if primer_mode not in ('removed','341F','338F','custom'): raise ValueError('请根据检测证据确认引物处理方式后再运行')
+    if primer_mode not in ('removed','341F','338F','custom','auto'): raise ValueError('未知引物处理方式')
     forward=c.get('forward','').strip().upper() if primer_mode=='custom' else PRIMERS.get(primer_mode,'')
     reverse=c.get('reverse','').strip().upper() if primer_mode=='custom' else PRIMERS['806R']
-    if primer_mode!='removed' and (not forward or not reverse or any(b not in IUPAC for b in forward+reverse)): raise ValueError('引物序列为空或不是有效 IUPAC 序列')
+    sequence_report=None; cleanup_plan=None
+    if data_state!='clean':
+        sequence_report=inspect_samples(samples,c,reads)
+        if not sequence_report['reliable']:
+            job['result']={'sequence_structure':sequence_report}
+            save_check_results(job,c,'inspect')
+            save_sequence_report(Path(job['run'])/'00_checks',sequence_report)
+            raise ValueError('序列结构未确认，已保存检测报告；请补充真实引物或依据来源确认已clean。未检出不等于clean')
+        cleanup_plan=sequence_report['recommended_primers']
     classifier=path(c['classifier']) if c.get('classifier','').strip() else Path('/nonexistent-classifier')
     if not quality_only and (not classifier.is_file() or classifier.suffix!='.qza'): raise ValueError('请选择与 QIIME 环境兼容的 V3–V4 分类器 .qza')
     reuse=not quality_only and bool(c.get('quality_run','').strip())
@@ -428,8 +447,11 @@ def preprocess(job,c,quality_only=False):
         run=path(c['quality_run'])
         if not (run/'quality_complete.json').is_file() or (run/'preprocess_started.json').exists(): raise ValueError('质量目录未完成或已经开始过预处理；请创建新的质量检查任务')
         old=json.loads((run/'parameters.json').read_text(encoding='utf8'))
-        keys=['input','metadata','mode','primer_mode','forward','reverse','env','conda']
-        if any(c.get(k)!=old.get(k) for k in keys): raise ValueError('数据、引物或环境改变，请重新执行质量检查')
+        keys=['input','metadata','mode','primer_mode','forward','reverse','env','conda','input_layout']
+        defaults={'input_layout':'unmerged'}
+        if any(c.get(k,defaults.get(k))!=old.get(k,defaults.get(k)) for k in keys): raise ValueError('数据、引物或环境改变，请重新执行质量检查')
+        if old.get('data_state',data_state)!=data_state: raise ValueError('输入clean状态改变，请重新质量检查')
+        if old.get('batch_id') and c.get('batch_id')!=old['batch_id']: raise ValueError('质量目录属于其他批次，请打开对应历史任务')
         input_inventory=json.loads((run/'input_inventory.json').read_text())
         for x in input_inventory:
             stat=Path(x['path']).stat()
@@ -446,6 +468,8 @@ def preprocess(job,c,quality_only=False):
     marker(run)
     job['run']=str(run); job['log']=str(run/'workflow.log')
     saved=dict(c, **resolve_group_style(c,samples),plot_settings=plotting); saved['samples']=samples
+    saved['cleanup_plan']=cleanup_plan
+    if sequence_report: save_sequence_report(run/'00_inputs/sequence_detection',sequence_report)
     save_group_style(run,resolve_group_style(saved,samples))
     save_plot_settings(run,plotting)
     (run/'parameters.json').write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf8')
@@ -472,20 +496,29 @@ def preprocess(job,c,quality_only=False):
         raw_counts=export_quality(job,c,'demux.qzv','quality-raw')
         finish_stage(job,raw_counts,['样本序列数量为完整文件计数；逐位置质量分布来自随机抽样，不代表每条 read 的完整质量。','已保存 per-sample-fastq-counts.tsv、forward-seven-number-summaries.tsv；双端还保存 reverse 表。'])
         if primer_mode!='removed':
-            begin_stage(job,'02_primers','引物去除与处理后质量统计',{'forward':forward,'reverse':reverse,'error_rate':0.1,'minimum_primer_overlap':min(len(forward),len(reverse)),'discard_untrimmed':True})
-            args=['cutadapt','trim-paired' if paired else 'trim-single','--i-demultiplexed-sequences','demux.qza','--p-front-f' if paired else '--p-front',forward,'--p-discard-untrimmed','--p-cores',c['threads'],'--o-trimmed-sequences','trimmed.qza']
-            args+=['--p-error-rate','0.1','--p-overlap',str(min(len(forward),len(reverse)))]
-            if paired: args += ['--p-front-r',reverse]
+            begin_stage(job,'02_primers','匹配引物及其前方附加序列去除、clean质量检查',{'primers':cleanup_plan,'error_rate':0.1,'full_primer_overlap':True,'discard_untrimmed':True,'downstream_unknown_sequence_removed':False})
+            # Each adapter has its own full-length overlap, never a shorter global
+            # reverse overlap inherited from the forward primer's length.
+            fronts=lambda d:[p+';min_overlap='+str(len(p)) for p in cleanup_plan[d]]
+            args=['cutadapt','trim-paired' if paired else 'trim-single','--i-demultiplexed-sequences','demux.qza','--p-front-f' if paired else '--p-front',*fronts('1'),'--p-discard-untrimmed','--p-cores',c['threads'],'--o-trimmed-sequences','trimmed.qza','--p-error-rate','0.1','--p-match-adapter-wildcards']
+            if paired: args += ['--p-front-r',*fronts('2')]
             q(job,c,*args); source='trimmed.qza'
             q(job,c,'demux','summarize','--i-data',source,'--o-visualization','trimmed.qzv')
             trimmed_counts=export_quality(job,c,'trimmed.qzv','quality-trimmed')
-            finish_stage(job,{'before':raw_counts,'after':trimmed_counts},['cutadapt 按匹配长度计算允许错误率，不等于固定允许 2 个引物错配。','未匹配指定引物的 reads 被丢弃；是否已去引物须依据来源说明和检测证据确认。'])
+            q(job,c,'tools','export','--input-path','trimmed.qza','--output-path','02_primers/qiime_fastq_export')
+            clean=export_clean_fastq(run/'02_primers/qiime_fastq_export',run/'02_primers/clean_fastq',samples,c,reads)
+            saved['clean_fastq']=clean
+            (run/'parameters.json').write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf8')
+            finish_stage(job,{'before':raw_counts,'after':trimmed_counts,'clean_fastq':clean},['按匹配序列切除完整引物及其前方附加序列；barcode身份与引物后的未知附加序列不能据此确认。','cutadapt 允许错误率0.1，支持IUPAC；与前1000条保守检测阈值不同。','未匹配的reads会被丢弃，数量见处理前后表。','clean FASTQ、样本文件对应CSV和残留检查已保存，原始数据只读。'])
+            if clean['residual_warning']: raise ValueError('clean FASTQ残留引物匹配超过5%抽样阈值，请检查残留报告；暂不进入DADA2')
         else:
             stage_report(run,'02_primers','引物处理',status='skipped',parameters={'primer_mode':'removed'},notes=['用户确认 FASTQ 已去除引物，本步不重复切除；额外 trim 默认 0。'])
     else:
         export_quality(job,c,'demux.qzv','quality-raw')
         if primer_mode!='removed': export_quality(job,c,'trimmed.qzv','quality-trimmed')
     advice=save_quality_advice(job,c)
+    if sequence_report: job['result']['sequence_structure']=sequence_report
+    if saved.get('clean_fastq'): job['result']['clean_fastq']=saved['clean_fastq']
     stage_report(run,'08_parameter_advice','自动参数推荐',results=advice,notes=['推荐采用质量分布和抽样长度的保守启发式，不是 QIIME 2 官方固定阈值，也不是保证最优参数。','质量表无法计算每条 read 的预期错误数或推断真实扩增子长度。'])
     if quality_only:
         inventory(run)
@@ -587,6 +620,7 @@ def diversity(job,c):
     run=path(c['run'])
     if not (run/'preprocess_complete.json').is_file(): raise ValueError('请选择本工作站已完成预处理的 run 目录')
     saved=json.loads((run/'parameters.json').read_text(encoding='utf8'))
+    if c.get('batch_id') and saved.get('batch_id') and c['batch_id']!=saved['batch_id']: raise ValueError('预处理结果属于其他批次，请先打开对应历史批次')
     saved=dict(saved,**resolve_group_style(c,saved['samples'],fallback=saved),plot_settings=resolve_plot_settings(c,fallback=saved))
     depth=integer(c,'depth',1,100000000); perms=integer(c,'permutations',99,99999)
     kept=retention(run,depth); rows=[(x['SampleID'],x['Group']) for x in kept if x['retained']]
@@ -792,6 +826,7 @@ def extension(job,c,kind):
         if not (parent/'preprocess_complete.json').is_file(): raise ValueError('扩展分析需要本工作站已完成预处理的 run 目录；不需要重新运行 DADA2')
         saved=json.loads((parent/'parameters.json').read_text(encoding='utf8'))
         output=parent/'11_extensions'
+    if kind!='lefse-render' and c.get('batch_id') and saved.get('batch_id') and c['batch_id']!=saved['batch_id']: raise ValueError('扩展分析输入属于其他批次，请先打开对应历史批次')
     if c.get('conda'): saved=dict(saved,conda=c['conda'])
     parent_samples=json.loads((parent/'parameters.json').read_text(encoding='utf8'))['samples']
     observed=totals(parent)
@@ -842,7 +877,9 @@ def worker(job,action,c):
         prepare_execution(job,ROOT,action,c,RUNTIME)
         if action=='preflight': preflight(job,c)
         elif action=='inspect':
-            job['result']=discover(c); job['step']='输入检查完成（检测前1000条，不代表全文件完整性）'
+            samples=discover(c)
+            job['result']=inspect_samples(samples,c,reads)
+            job['step']='配对与序列结构检测完成（未检出不等于clean）'
         elif action=='quality': preprocess(job,c,quality_only=True)
         elif action=='recommend': refresh_quality_advice(job,c)
         elif action=='preprocess': preprocess(job,c)
@@ -892,6 +929,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             u=urlparse(self.path); p=parse_qs(u.query)
             if u.path=='/api/runtime': self.send(RUNTIME)
+            elif u.path=='/api/batches':
+                from batch_context import list_batches
+                self.send(list_batches(p['root'][0],module_api()))
+            elif u.path=='/api/batch':
+                from batch_context import restore_batch
+                self.send(restore_batch(p['run'][0],module_api()))
             elif u.path=='/api/group-style': self.send(group_style_input(metadata=p.get('metadata',[None])[0],run=p.get('run',[None])[0]))
             elif u.path=='/api/plot-settings': self.send(plot_settings_input(p['run'][0]))
             elif u.path=='/api/figures':
