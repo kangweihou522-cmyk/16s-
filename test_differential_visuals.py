@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -116,6 +117,65 @@ saveRDS(list(res=res,res_pair=pair,zero_ind=zero),a[1])""", self.folder / 'ancom
                          'Cached plots must preserve original counts/metadata/options/model results')
         for filename in ('abundance_heatmap.png', 'abundance_heatmap.svg', 'abundance_bubble.png', 'abundance_bubble.svg'):
             self.assertGreater((abundance / filename).stat().st_size, 500)
+        defaults = json.loads((abundance / 'abundance_bubble_plot_settings.json').read_text())['effective']
+        self.assertEqual((defaults['width'], defaults['height'], defaults['dpi']), (13, 8, 200))
+        self.assertEqual(defaults['formats'], ['png', 'svg'])
+        self.assertEqual(defaults['profile_settings']['max_size'], 10)
+
+    def test_cached_custom_plot_settings_change_presentation_only(self):
+        self.counts.write_text(self.counts.read_text().replace('taxon_B', 'taxon_Z'))
+        self.write_fit()
+        self.r("""a<-commandArgs(TRUE);f<-readRDS(a[1]);for(key in c('res','res_pair','zero_ind')) f[[key]]$taxon[f[[key]]$taxon=='taxon_B']<-'taxon_Z';saveRDS(f,a[1])""",
+               self.folder / 'ancombc2_fit.rds')
+        saved = dict(self.options, plot_settings={'effect': {'show_errorbars': False}})
+        (self.source / 'differential_options.json').write_text(json.dumps(saved))
+        before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                  for path in self.source.rglob('*') if path.is_file()}
+        settings = {'general': {'dpi': 144, 'font_family': 'DejaVu Serif', 'base_size': 12,
+                               'title_size': 17, 'axis_text_size': 9, 'legend_text_size': 8,
+                               'legend_position': 'bottom', 'theme': 'classic',
+                               'background': 'transparent', 'show_caption': False, 'formats': 'png_svg_pdf'},
+                    'heatmap': {'width': 9, 'height': 5.5, 'title': 'Heat {rank} · {comparison}',
+                                'x_label': 'Study groups', 'y_label': 'Taxa', 'label_size': 8,
+                                'row_order': 'alphabetical', 'show_values': True},
+                    'bubble': {'width': 10, 'height': 8, 'title': 'Bubble {rank} · {comparison}',
+                               'max_size': 7, 'point_alpha': .6, 'show_values': True},
+                    'effect': {'width': 8, 'height': 4.5, 'title': 'Effects {rank}: {comparison}',
+                               'x_label': 'Saved LFC', 'y_label': 'Taxa', 'point_size': 3.5}}
+        target, summary = self.redraw(plot_settings=settings)
+        self.assertFalse(summary['statistics_refit']); self.assertFalse(summary['q_recomputed'])
+        folder = target / '02_differential' / 'L6_genus'
+        abundance = folder / 'abundance'
+        bubble_record = json.loads((abundance / 'abundance_bubble_plot_settings.json').read_text())['effective']
+        self.assertEqual((bubble_record['width'], bubble_record['height'], bubble_record['dpi']), (10, 8, 144))
+        self.assertEqual(bubble_record['font'], 'DejaVu Serif')
+        self.assertEqual(bubble_record['labels']['title'], 'Bubble genus · all groups')
+        self.assertEqual(bubble_record['profile_settings']['max_size'], 7)
+        effect_record = json.loads((folder / 'comparisons' / 'pair_002' / 'effect_plot_settings.json').read_text())['effective']
+        self.assertEqual(effect_record['labels']['title'], 'Effects genus: HDC2 versus LDC_1')
+        self.assertFalse(effect_record['profile_settings']['show_errorbars'], 'Unspecified cosmetic controls inherit saved settings')
+        self.assertEqual(effect_record['profile_settings']['point_size'], 3.5)
+        heat = self.table(abundance / 'heatmap_plot_input.tsv')
+        bubble = self.table(abundance / 'bubble_plot_input.tsv')
+        self.assertEqual({row['plot_y'] for row in heat if row['taxon'] == 'taxon_SZ'}, {'2'})
+        self.assertEqual({row['plot_y'] for row in bubble if row['taxon'] == 'taxon_SZ'}, {'1'},
+                         'Heatmap row-order control must not reorder the bubble profile')
+        for row in heat:
+            original = next(value for value in bubble if value['taxon'] == row['taxon'] and value['Group'] == row['Group'])
+            self.assertEqual(row['mean_relative_abundance'], original['mean_relative_abundance'])
+        svg = (abundance / 'abundance_heatmap.svg').read_text()
+        self.assertIn('Heat genus', svg); self.assertIn('50.00%', svg)
+        self.assertIn('DejaVu Serif', svg)
+        self.assertNotIn('Each saved input sample', svg, 'Hiding captions must not change data or settings')
+        image = (abundance / 'abundance_bubble.png').read_bytes()
+        self.assertEqual(struct.unpack('>II', image[16:24]), (1440, 1152))
+        self.assertEqual(image[25], 6, 'Transparent PNG should contain an alpha channel')
+        for stem in ('abundance_heatmap', 'abundance_bubble'):
+            self.assertTrue((abundance / (stem + '.pdf')).read_bytes().startswith(b'%PDF-'))
+        pair = self.table(folder / 'comparisons' / 'pair_002' / 'comparison.tsv')
+        actual = next(row for row in pair if row['taxon'] == 'taxon_A')
+        self.assertEqual((float(actual['lfc']), float(actual['se']), float(actual['q'])), (1.1, .3, .01))
+        self.assertEqual(before, {path: hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in before})
 
     def test_two_group_primary_mapping_and_no_hit_selection(self):
         self.r("""a<-commandArgs(TRUE);source(a[1]);root<-a[2]
@@ -124,6 +184,8 @@ two<-droplevels(meta[meta$Group!='HDC2',,drop=FALSE]);plan<-official_contrast_ma
 empty<-data.frame(taxon=c('taxon_A','taxon_B'),lfc_GroupLDC_1=c(NA_real_,1),se_GroupLDC_1=c(NA_real_,.2),p_GroupLDC_1=c(NA_real_,.3),q_GroupLDC_1=c(NA_real_,.7),diff_GroupLDC_1=c(FALSE,FALSE),passed_ss_GroupLDC_1=c(FALSE,TRUE),check.names=FALSE)
 out<-file.path(root,'nohit');dir.create(out);opts<-list(reference_group='CON',alpha=.05,pseudo_sens=TRUE,font='sans')
 report<-plot_ancom_level(list(res=empty),m[,rownames(two),drop=FALSE],two,out,opts,'synthetic two groups');stopifnot(report$result_source=='res',report$abundance$selected_total==0,report$abundance$shown==0)
+message_plot<-empty_differential_figure('No hits','No saved estimates','sans');config<-diff_plot_config(list(plot_settings=list(general=list(show_caption=FALSE,theme='minimal'))))
+message_plot<-style_differential_figure(message_plot,config,'sans');stopifnot(ggplot2::ggplot_build(message_plot)$data[[1]]$label=='No saved estimates')
 map<-official_contrast_map(meta,'CON');stopifnot(map$key[3]=='GroupHDC2_GroupLDC_1')
 zero<-data.frame(taxon=c('taxon_A','taxon_B'),CON=c(TRUE,TRUE),LDC_1=c(NA,TRUE),HDC2=c(FALSE,FALSE),check.names=FALSE)
 names(zero)[-1]<-paste0('structural_zero (Group = ',names(zero)[-1],')')

@@ -8,6 +8,7 @@ from collections import Counter
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from group_style import resolve_group_style
+from plot_settings import resolve_plot_settings
 
 LEVEL_NAMES = {2: 'phylum', 3: 'class', 4: 'order', 5: 'family', 6: 'genus'}
 METHODS = {'ancombc2': 'ANCOM-BC2', 'qiime_ancom': 'QIIME 2 ANCOM'}
@@ -102,6 +103,7 @@ def options(config, samples):
                        'pseudocount': 1, 'seed': None, 'iter_control': None,
                        'em_control': None, 'mdfdr_control': None})
     values.update(plot_options(config))
+    values['plot_settings'] = resolve_plot_settings(config)
     return values
 
 
@@ -221,6 +223,7 @@ def run_differential(job, config, saved, parent, api):
     run = Path(job['run'])
     opts = options(config, saved['samples'])
     opts['group_style'] = resolve_group_style(config, saved['samples'], fallback=saved)
+    opts['plot_settings'] = resolve_plot_settings(config, fallback=saved)
     tables = _manifest_tables(config, parent, opts['levels'], api)
     api.begin_stage(job, '01_counts', '差异检验输入：未抽平门至属计数', opts)
     entries, expected_ids, metadata_rows, groups, excluded = [], None, None, None, None

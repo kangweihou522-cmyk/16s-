@@ -29,23 +29,35 @@ original_alpha_plot <- function(data, annotation,
                                  font_family = "Times New Roman",
                                  group_colors = c(CON = "#D55E00", LDC = "#0072B2",
                                                   HDC = "#CC79A7"),
-                                 display_names = NULL, seed = 123L) {
+                                 display_names = NULL, seed = 123L,
+                                 point_size = 1.5, box_width = 0.6,
+                                 jitter_width = 0.2, show_points = TRUE,
+                                 show_letters = TRUE, show_outliers = FALSE,
+                                 plot_type = "boxplot") {
   labels <- setNames(levels(data$Metric), levels(data$Metric))
   if (!is.null(display_names)) {
     known <- intersect(names(display_names), names(labels))
     labels[known] <- display_names[known]
   }
-  ggplot2::ggplot(data, ggplot2::aes(x = Group, y = Value, color = Group)) +
-    ggplot2::geom_boxplot(fill = NA, outlier.shape = NA, width = 0.6) +
-    ggplot2::geom_jitter(position = ggplot2::position_jitter(width = 0.2, seed = seed),
-                         size = 1.5, alpha = 1) +
+  p <- ggplot2::ggplot(data, ggplot2::aes(x = Group, y = Value, color = Group))
+  p <- p + if (plot_type == "violin") {
+    ggplot2::geom_violin(fill = NA, width = box_width)
+  } else {
+    ggplot2::geom_boxplot(fill = NA, outlier.shape = if (show_outliers) 19 else NA,
+                          width = box_width)
+  }
+  if (show_points) p <- p + ggplot2::geom_jitter(
+    position = ggplot2::position_jitter(width = jitter_width, seed = seed),
+    size = point_size, alpha = 1)
+  p <- p +
     ggplot2::facet_wrap(~ Metric, nrow = 1, scales = "free_y",
-                        labeller = ggplot2::labeller(Metric = labels)) +
-    ggplot2::geom_text(
+                        labeller = ggplot2::labeller(Metric = labels))
+  if (show_letters) p <- p + ggplot2::geom_text(
       data = annotation, ggplot2::aes(x = Group, y = y, label = Letter),
       inherit.aes = FALSE, vjust = 0, family = font_family,
       fontface = "plain", size = 8
-    ) +
+    )
+  p +
     ggplot2::theme_minimal() +
     ggplot2::labs(title = "", x = "", y = "") +
     ggplot2::theme(

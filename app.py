@@ -10,6 +10,7 @@ from quality_advice import recommend_parameters
 from depth_advice import read_curves, recommend_depth
 from execution_record import prepare_execution, capture_r_sources, command_explanation, finalize_execution, now
 from group_style import resolve_group_style, save_group_style
+from plot_settings import resolve_plot_settings, save_plot_settings, ui_schema
 
 ROOT = Path(__file__).resolve().parent
 
@@ -291,6 +292,8 @@ def probe(job,args,timeout,process_env=None):
         if '_execution' in job: job['_execution']['commands'].append(entry)
 
 def preflight(job,c):
+    requested_font=resolve_plot_settings(c)['general']['font_family']
+    if requested_font!='original': c=dict(c,font=requested_font)
     job['step']='检查 QIIME 2、插件、R 与分类器'
     result={'python':platform.python_version(),'cpu_threads':os.cpu_count(),'checks':[]}
     for name in ['conda','QIIME 2']:
@@ -394,6 +397,8 @@ def save_check_results(job,c,action):
     stage_report(run,'00_checks','输入与配对检查' if action=='inspect' else '运行环境检查',results={'inspection':job.get('result')},notes=['输入检查只抽查前 1000 条 reads，不等于全文件完整性检测。' if action=='inspect' else '请查看每项 ok 状态；检查结束不表示所有依赖均通过，也不表示已分析测序数据。'])
 
 def preprocess(job,c,quality_only=False):
+    plotting=resolve_plot_settings(c)
+    if plotting['general']['font_family']!='original': c=dict(c,font=plotting['general']['font_family'])
     c=dict(c)
     auto=c.get('parameter_mode')=='auto'
     if auto or not str(c.get('threads','')).strip(): c['threads']=str(min(4,os.cpu_count() or 1))
@@ -439,8 +444,9 @@ def preprocess(job,c,quality_only=False):
         if not quality_only: (run/'preprocess_started.json').write_text('{}')
     marker(run)
     job['run']=str(run); job['log']=str(run/'workflow.log')
-    saved=dict(c, **resolve_group_style(c,samples)); saved['samples']=samples
+    saved=dict(c, **resolve_group_style(c,samples),plot_settings=plotting); saved['samples']=samples
     save_group_style(run,resolve_group_style(saved,samples))
+    save_plot_settings(run,plotting)
     (run/'parameters.json').write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf8')
     (run/'input_inventory.json').write_text(json.dumps([{'path':v,'size':Path(v).stat().st_size,'mtime_ns':Path(v).stat().st_mtime_ns} for x in samples for v in x['files'].values()],indent=2),encoding='utf8')
     write_metadata(run,[(x['SampleID'],x['Group']) for x in samples])
@@ -580,7 +586,7 @@ def diversity(job,c):
     run=path(c['run'])
     if not (run/'preprocess_complete.json').is_file(): raise ValueError('请选择本工作站已完成预处理的 run 目录')
     saved=json.loads((run/'parameters.json').read_text(encoding='utf8'))
-    saved=dict(saved,**resolve_group_style(c,saved['samples'],fallback=saved))
+    saved=dict(saved,**resolve_group_style(c,saved['samples'],fallback=saved),plot_settings=resolve_plot_settings(c,fallback=saved))
     depth=integer(c,'depth',1,100000000); perms=integer(c,'permutations',99,99999)
     kept=retention(run,depth); rows=[(x['SampleID'],x['Group']) for x in kept if x['retained']]
     groups={g for _,g in rows}; orig={x['Group'] for x in kept}
@@ -592,6 +598,7 @@ def diversity(job,c):
     marker(sub)
     job['run']=str(sub); job['log']=str(sub/'workflow.log'); job['step']='单次抽平与核心多样性'
     style_file=save_group_style(sub,resolve_group_style(saved,saved['samples']))
+    plot_file=save_plot_settings(sub,saved['plot_settings'])
     write_metadata(sub,rows); artifact_path(sub,'retention.json').write_text(json.dumps(kept,ensure_ascii=False,indent=2),encoding='utf8')
     (sub/'parameters.json').write_text(json.dumps({'depth':depth,'permutations':perms,'preprocess':str(run),'config':saved},ensure_ascii=False,indent=2),encoding='utf8')
     # QIIME's random rarefaction may differ between runs. Preserve this table; do not re-rarefy for plots.
@@ -639,7 +646,7 @@ def diversity(job,c):
     (sub/'qiime_statistics_complete.json').write_text(json.dumps({'completed_at':time.time()}))
     finish_stage(job,{'executed':sum(x['status']=='executed' for x in stats),'skipped':sum(x['status']=='skipped' for x in stats),'tests':stats},['检验采用 QIIME 2 保存的结果；常数指标或全零距离会注明原因并跳过，不生成虚构 P 值。'])
     begin_stage(job,'04_R_figures','R 绘图：读取保存的 QIIME 2 结果',{'font':saved['font'],'r_env':saved.get('r_env','16s-workstation-r')})
-    command(job,r_command(saved,str(ROOT/'render.R'),str(sub),saved['font'],str(run),saved.get('plot_scripts',''),str(style_file)),sub,process_env=r_execution_env(saved))
+    command(job,r_command(saved,str(ROOT/'render.R'),str(sub),saved['font'],str(run),saved.get('plot_scripts',''),str(style_file),'',str(plot_file)),sub,process_env=r_execution_env(saved))
     figure_root=artifact_path(sub,'R_original_style')
     summary_file=figure_root/'render_summary.json'
     if not summary_file.is_file(): raise ValueError('R 命令结束但没有生成绘图摘要，请查看运行日志')
@@ -665,6 +672,18 @@ def group_style_input(metadata=None,run=None):
     style=resolve_group_style({},samples,fallback=fallback)
     return {**style,'source':str(source),'sample_counts':{group:sum(row['Group']==group for row in samples) for group in style['group_order']}}
 
+def plot_settings_input(run):
+    source=approved_run(run)
+    filename=source/'plot_settings.json'
+    if filename.is_file():
+        settings=resolve_plot_settings({'plot_settings':json.loads(filename.read_text(encoding='utf8'))})
+        recorded=True
+    else:
+        parameters=json.loads((source/'parameters.json').read_text(encoding='utf8'))
+        config=parameters.get('config',parameters)
+        settings=resolve_plot_settings({},fallback=config); recorded='plot_settings' in config
+    return {'plot_settings':settings,'recorded':recorded,'source':str(source)}
+
 def render_saved_diversity(job,c):
     analysis=approved_run(c.get('diversity_run') or c.get('result_run',''))
     if not (analysis/'qiime_statistics_complete.json').is_file():
@@ -673,15 +692,16 @@ def render_saved_diversity(job,c):
     parent=approved_run(previous['preprocess'])
     saved=previous['config']
     style=resolve_group_style(c,saved['samples'],fallback=saved)
-    config=dict(saved,**style,font=c.get('font') or saved['font'])
+    config=dict(saved,**style,font=c.get('font') or saved['font'],plot_settings=resolve_plot_settings(c,fallback=saved))
     output=analysis/'05_replots'; output.mkdir(exist_ok=True)
     run=output/('figures_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]); run.mkdir(); marker(run)
     job.update(run=str(run),log=str(run/'workflow.log'))
     style_file=save_group_style(run,style)
+    plot_file=save_plot_settings(run,config['plot_settings'])
     (run/'parameters.json').write_text(json.dumps({'extension':'diversity-render','preprocess':str(parent),'diversity_run':str(analysis),'config':config,'extension_parameters':dict(c,diversity_run=str(analysis)),'statistics_refit':False},ensure_ascii=False,indent=2),encoding='utf8')
     figure_root=run/'04_R_figures'/'R_original_style'
     begin_stage(job,'04_R_figures','仅重绘：保留原抽平、指标及统计结果',{'group_style':style,'statistics_refit':False})
-    command(job,r_command(config,str(ROOT/'render.R'),str(analysis),config['font'],str(parent),config.get('plot_scripts',''),str(style_file),str(figure_root)),run,process_env=r_execution_env(config))
+    command(job,r_command(config,str(ROOT/'render.R'),str(analysis),config['font'],str(parent),config.get('plot_scripts',''),str(style_file),str(figure_root),str(plot_file)),run,process_env=r_execution_env(config))
     summary_file=figure_root/'render_summary.json'
     if not summary_file.is_file(): raise ValueError('R 绘图结束但没有生成绘图摘要')
     summary=json.loads(summary_file.read_text(encoding='utf8'))
@@ -694,7 +714,7 @@ def differential_gallery(run):
     for filename in sorted(Path(run).glob('02_differential/L*/abundance/abundance_heatmap.png')):
         folder=filename.parent
         figures.append({'level':folder.parent.name,**{kind+'_'+ext:str(folder/('abundance_'+kind+'.'+ext))
-                       for kind in ('heatmap','bubble') for ext in ('png','svg') if (folder/('abundance_'+kind+'.'+ext)).is_file()}})
+                       for kind in ('heatmap','bubble') for ext in ('png','svg','pdf') if (folder/('abundance_'+kind+'.'+ext)).is_file()}})
     return figures
 
 def render_saved_differential(job,c):
@@ -719,12 +739,13 @@ def render_saved_differential(job,c):
     parent=approved_run(previous['preprocess']); saved=previous['config']
     style=resolve_group_style(c,saved['samples'],fallback=source.get('group_style',saved))
     presentation=plot_options(c,fallback=source)
-    config=dict(saved,**style,font=c.get('font') or source.get('font') or saved.get('font','sans'))
-    options=dict(source,**presentation,group_style=style,font=config['font'],analysis_run=str(analysis),statistics_refit=False)
+    config=dict(saved,**style,font=c.get('font') or source.get('font') or saved.get('font','sans'),plot_settings=resolve_plot_settings(c,fallback=source))
+    options=dict(source,**presentation,group_style=style,plot_settings=config['plot_settings'],font=config['font'],analysis_run=str(analysis),statistics_refit=False)
     output=analysis/'03_replots'; output.mkdir(exist_ok=True)
     run=output/('figures_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]);run.mkdir();marker(run)
     job.update(run=str(run),log=str(run/'workflow.log'))
     save_group_style(run,style)
+    save_plot_settings(run,config['plot_settings'])
     (run/'parameters.json').write_text(json.dumps({'extension':'differential-render','preprocess':str(parent),'differential_run':str(analysis),'config':config,'extension_parameters':dict(c,differential_run=str(analysis)),'statistics_refit':False},ensure_ascii=False,indent=2),encoding='utf8')
     options_file=run/'differential_options.json'; options_file.write_text(json.dumps(options,ensure_ascii=False,indent=2),encoding='utf8')
     begin_stage(job,'02_differential','差异菌热图、气泡图及已保存两两比较重绘',{'statistics_refit':False,'group_style':style,**presentation})
@@ -765,12 +786,14 @@ def extension(job,c,kind):
     if kind in ('differential','lefse') and {sample['Group'] for sample in selected}!={sample['Group'] for sample in parent_samples}:
         raise ValueError('过滤后某个组已没有有效样本，不能忽略该组进行差异分析')
     style=resolve_group_style(c,selected,fallback=saved)
-    c=dict(c,**style)
-    saved=dict(saved,samples=selected,**style)
+    plotting=resolve_plot_settings(c,fallback=saved)
+    c=dict(c,**style,plot_settings=plotting)
+    saved=dict(saved,samples=selected,**style,plot_settings=plotting)
     output.mkdir(exist_ok=True)
     run=output/(kind+'_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]); run.mkdir(); marker(run)
     job.update(run=str(run),log=str(run/'workflow.log'))
     save_group_style(run,style)
+    save_plot_settings(run,plotting)
     parameters={'extension':kind,'preprocess':str(parent),'config':saved,'extension_parameters':c,
                 'samples_absent_from_filtered_table':[sample for sample in parent_samples if sample['SampleID'] not in observed]}
     (run/'parameters.json').write_text(json.dumps(parameters,ensure_ascii=False,indent=2),encoding='utf8')
@@ -846,13 +869,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=='/':
             if self.headers.get('Host') not in (f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'):
                 self.send({'error':'Host rejected'},403); return
-            body=(ROOT/'index.html').read_text(encoding='utf8').replace('__TOKEN__',TOKEN).encode()
+            body=(ROOT/'index.html').read_text(encoding='utf8').replace('__TOKEN__',TOKEN).replace('__PLOT_SCHEMA__',json.dumps(ui_schema(),ensure_ascii=False).replace('<','\\u003c')).encode()
             self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-store'); self.send_header('Content-Security-Policy',"frame-ancestors 'none'"); self.end_headers(); self.wfile.write(body); return
         if not self.authorized(): self.send({'error':'访问被拒绝'},403); return
         try:
             u=urlparse(self.path); p=parse_qs(u.query)
             if u.path=='/api/runtime': self.send(RUNTIME)
             elif u.path=='/api/group-style': self.send(group_style_input(metadata=p.get('metadata',[None])[0],run=p.get('run',[None])[0]))
+            elif u.path=='/api/plot-settings': self.send(plot_settings_input(p['run'][0]))
             elif u.path=='/api/status':
                 j=JOBS[p['id'][0]]; result={key:value for key,value in j.items() if not key.startswith('_')}
                 logfile=Path(j['log']); result['log_tail']=''

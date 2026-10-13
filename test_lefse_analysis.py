@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import pickle
+import re
 import subprocess
 import sys
 import tempfile
@@ -68,8 +69,10 @@ class SimulatedCLI:
                 finally:
                     sys.argv = previous
             elif Path(tail[0]).name == 'render_empty.py':
+                settings = json.loads(Path(tail[4]).read_text()) if len(tail) > 4 else {}
+                formats = ('png', 'svg', 'pdf') if settings.get('general', {}).get('formats') == 'png_svg_pdf' else ('png', 'svg')
                 for kind in ('bar', 'cladogram'):
-                    for ext in ('png', 'svg'):
+                    for ext in formats:
                         (Path(tail[1]) / (kind + '.' + ext)).write_text('SIMULATED no hits image')
             elif Path(tail[0]).name == 'render_official.py':
                 Path(tail[4]).write_text('SIMULATED official plot presentation adapter output')
@@ -352,6 +355,50 @@ class LefseCacheTests(unittest.TestCase):
             lefse.render_lefse(self.job, {'lda_threshold': 3}, self.run, self.api)
         self.assertEqual(len(self.api.commands), start)
 
+    def test_plot_options_top_n_and_pdf_only_change_display_not_saved_model(self):
+        self.fit()
+        cached = (self.run / lefse.FIT_RESULT).read_bytes()
+        marker = (self.run / 'lefse_complete.json').read_bytes()
+        output = self.run / 'renders' / 'plot_settings'
+        output.mkdir(parents=True)
+        start = len(self.api.commands)
+        config = {'lda_threshold': 1, 'plot_settings': {
+            'general': {'dpi': 210, 'formats': 'png_svg_pdf', 'background': 'transparent', 'legend_position': 'bottom'},
+            'lefse_bar': {'orientation': 'vertical', 'top_n': 1, 'label_levels': 3, 'feature_font_size': 12,
+                          'class_font_size': 11, 'width': 9, 'height': 6, 'title': 'Custom LDA {threshold}'},
+            'lefse_cladogram': {'max_level': 5, 'min_point_size': 2, 'max_point_size': 8, 'label_font_size': 10}}}
+        result = lefse.render_lefse({'run': str(output)}, config, self.run, self.api)
+        self.assertEqual((self.run / lefse.FIT_RESULT).read_bytes(), cached)
+        self.assertEqual((self.run / 'lefse_complete.json').read_bytes(), marker)
+        self.assertEqual(result['bar_biomarker_count'], 1)
+        self.assertGreater(result['biomarker_count'], 1)
+        self.assertEqual(len(result['figures']), 6)
+        later = self.api.commands[start:]
+        self.assertEqual(len(later), 6)
+        self.assertTrue(all(Path(args[6]).name == 'render_official.py' for args in later))
+        bars = [args for args in later if args[7] == 'bar']
+        clades = [args for args in later if args[7] == 'cladogram']
+        self.assertTrue(all(args[9].endswith('bar_display_results.res') for args in bars))
+        self.assertTrue(all(args[9].endswith('threshold_results.res') for args in clades))
+        bar_rows = lefse.read_results(output / '03_figures/bar_display_results.res')
+        self.assertEqual(len(bar_rows), 1)
+        self.assertEqual(abs(bar_rows[0]['lda_score']), max(abs(row['lda_score']) for row in lefse.read_results(self.run / lefse.FIT_RESULT)))
+        self.assertTrue(all(args[args.index('--orientation') + 1] == 'v' for args in bars))
+        self.assertTrue(all(args[args.index('--max_lev') + 1] == '5' for args in clades))
+        self.assertTrue(all(args[args.index('--dpi') + 1] == '210' for args in later))
+        self.assertTrue(all(args[args.index('--title') + 1] == 'Custom LDA 1.0' for args in bars))
+
+    def test_no_hit_preserves_truthful_placeholder_with_optional_pdf(self):
+        self.fit()
+        output = self.run / 'renders' / 'no_hits_pdf'
+        output.mkdir(parents=True)
+        result = lefse.render_lefse({'run': str(output)}, {'lda_threshold': 99,
+            'plot_settings': {'general': {'formats': 'png_svg_pdf', 'show_caption': False}}}, self.run, self.api)
+        self.assertTrue(result['no_hits'])
+        self.assertEqual(result['bar_biomarker_count'], 0)
+        self.assertEqual(len(result['figures']), 6)
+        self.assertIn('No biomarkers above LDA threshold', lefse.EMPTY_PLOT_SCRIPT)
+
     def test_fit_prunes_formatter_added_unknown_ancestors_but_fits_named_descendants(self):
         (self.parent / 'exported-taxonomy/taxonomy.tsv').write_text(
             'Feature ID\tTaxon\na\tk__Bacteria; p__P; c__Incertae_Sedis; o__O; f__F1; g__Named1\n'
@@ -390,6 +437,106 @@ class LefseCacheTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('LEFSE_OFFICIAL_PLOT_ROOT'),
                      'Set LEFSE_OFFICIAL_PLOT_ROOT to the previously downloaded official LEfSe source')
 class OfficialPlotStyleTests(unittest.TestCase):
+    def test_actual_no_hit_images_keep_mandatory_status_when_caption_is_hidden(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / 'render_empty.py'
+            script.write_text(lefse.EMPTY_PLOT_SCRIPT)
+            settings = lefse.resolve_plot_settings({'plot_settings': {
+                'general': {'dpi': 90, 'show_caption': False, 'formats': 'png_svg_pdf',
+                            'background': 'transparent', 'font_family': 'DejaVu Serif'},
+                'lefse_bar': {'width': 7, 'height': 4, 'title': 'No hits at {threshold}'}}})
+            setting_file = root / 'settings.json'
+            setting_file.write_text(json.dumps(settings))
+            proc = subprocess.run([sys.executable, str(script), str(root), '99', 'executed', str(setting_file)],
+                                  capture_output=True, text=True, timeout=30,
+                                  env={**os.environ, 'MPLCONFIGDIR': str(root / 'matplotlib')})
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            for kind in ('bar', 'cladogram'):
+                for ext in ('png', 'svg', 'pdf'):
+                    self.assertGreater((root / (kind + '.' + ext)).stat().st_size, 0)
+                svg = (root / (kind + '.svg')).read_text()
+                self.assertIn('No biomarkers above LDA threshold 99.0', svg)
+                self.assertNotIn('Saved analysis; no statistical refit', svg)
+            self.assertIn('No hits at 99.0', (root / 'bar.svg').read_text())
+
+    def test_custom_vertical_pdf_fonts_transparency_and_display_level(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / 'render_official.py'
+            script.write_text(lefse.OFFICIAL_PLOT_SCRIPT)
+            order = ['Z/group', 'A group', 'B group']
+            settings = lefse.resolve_plot_settings({'plot_settings': {
+                'general': {'dpi': 90, 'base_size': 11.5, 'title_size': 16, 'axis_text_size': 9, 'font_family': 'DejaVu Serif',
+                            'legend_text_size': 12, 'background': 'transparent', 'theme': 'bw',
+                            'legend_position': 'bottom', 'formats': 'png_svg_pdf', 'show_caption': False},
+                'lefse_bar': {'orientation': 'vertical', 'width': 8, 'height': 5, 'feature_font_size': 12.5,
+                              'title': 'Custom title {threshold}', 'x_label': 'Named taxa', 'y_label': 'Saved LDA'},
+                'lefse_cladogram': {'width': 8, 'height': 5, 'max_level': 7, 'min_point_size': 1, 'max_point_size': 8}}})
+            style = {'group_order': order, 'group_colors': {'Z/group': '#AA1122', 'A group': '#228844', 'B group': '#1144BB'},
+                     'groups': {'Z/group': 'Z_group', 'A group': 'A_group', 'B group': 'B_group'}, 'plot_settings': settings}
+            style_file = root / 'style.json'
+            style_file.write_text(json.dumps(style))
+            fixture = root / 'fixture.res'
+            # Missing middle class tests that vertical colors do not shift; large
+            # LDA vs log abundance tests that groups remain in requested order.
+            fixture.write_text('k__Bacteria.p__P1.c__C1.o__O1.f__F1.g__G1\t1\tZ_group\t10\t.01\n'
+                               'k__Bacteria.p__P3.c__C3.o__O3.f__F3.g__G3\t1\tB_group\t2.5\t.03\n')
+            original = fixture.read_bytes()
+            runner = """import os,sys,types,runpy
+sys.path.insert(0,os.environ['LEFSE_OFFICIAL_PLOT_ROOT'])
+rpy2=types.ModuleType('rpy2'); rpy2.__path__=[]
+sys.modules['rpy2']=rpy2; sys.modules['rpy2.robjects']=types.ModuleType('rpy2.robjects')
+sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name='__main__')
+"""
+            env = {**os.environ, 'MPLCONFIGDIR': str(root / 'matplotlib')}
+
+            def render(kind, extension, output=None):
+                output = output or root / (kind + '.' + extension)
+                args = [sys.executable, '-c', runner, str(script), kind, str(style_file), str(fixture), str(output),
+                        '--format', extension, *lefse._plot_options(kind, settings, 2, 'Z_group:A_group:B_group')]
+                proc = subprocess.run(args, capture_output=True, text=True, env=env, timeout=30)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertGreater(output.stat().st_size, 0)
+                return output
+
+            for kind in ('bar', 'cladogram'):
+                render(kind, 'png')
+                self.assertTrue(render(kind, 'pdf').read_bytes().startswith(b'%PDF'))
+                svg = render(kind, 'svg')
+                texts = [(''.join(node.itertext()).strip(), node.attrib) for node in ET.parse(svg).iter()
+                         if node.tag.endswith('}text')]
+                self.assertEqual([label for label, _ in texts if label in order], ['Z/group', 'B group'])
+                for color in ('#aa1122', '#1144bb'):
+                    self.assertIn(color, svg.read_text().lower())
+                audit = json.loads(Path(str(svg) + '.style.json').read_text())
+                self.assertEqual(audit['plot_settings'], settings)
+                if kind == 'bar':
+                    self.assertIn('Custom title 2', [label for label, _ in texts])
+                    self.assertIn('Named taxa', [label for label, _ in texts])
+                    self.assertIn('Saved LDA', [label for label, _ in texts])
+                    features = {label: float(attrs['x']) if 'x' in attrs else
+                                float(re.search(r'translate\(([-+0-9.e]+)', attrs['transform'])[1])
+                                for label, attrs in texts if label.startswith('f__')}
+                    self.assertLess(features['f__F1.g__G1'], features['f__F3.g__G3'])
+                    self.assertTrue(all('font-size: 12.5px' in attrs['style'] for label, attrs in texts if label.startswith('f__')))
+                    self.assertTrue(all('font-size: 12px' in attrs['style'] for label, attrs in texts if label in order))
+                    self.assertTrue(all('DejaVu Serif' in attrs['style'] for label, attrs in texts))
+            # Hiding a legend still leaves valid official bar drawing functions.
+            settings['general']['legend_position'] = 'none'
+            style_file.write_text(json.dumps(style))
+            hidden = render('bar', 'svg', root / 'hidden.svg')
+            text = hidden.read_text()
+            self.assertNotIn('Z/group', text)
+            self.assertNotIn('B group', text)
+            # No fabricated ancestor effects when a chosen display level has no rows.
+            settings['lefse_cladogram']['max_level'] = 2
+            style_file.write_text(json.dumps(style))
+            empty = render('cladogram', 'svg', root / 'display_empty.svg')
+            self.assertIn('No taxa available at the selected display level', empty.read_text())
+            self.assertTrue(json.loads(Path(str(empty) + '.style.json').read_text())['empty_display_level'])
+            self.assertEqual(fixture.read_bytes(), original)
+
     def test_official_renderers_follow_named_colors_original_labels_and_order(self):
         """Run real official plotting functions, with no statistical fit or R calls."""
         with tempfile.TemporaryDirectory() as temporary:

@@ -6,7 +6,9 @@ original_pcoa_plot <- function(points, proportion, p_value = NULL,
                                font_family = "Times New Roman",
                                group_colors = c(CON = "#D55E00", LDC = "#0072B2",
                                                 HDC = "#CC79A7"),
-                               ellipse = TRUE) {
+                               ellipse = TRUE, point_size = 2, point_alpha = NULL,
+                               ellipse_level = 0.95, ellipse_alpha = 0.15,
+                               show_sample_labels = FALSE) {
   p <- ggplot2::ggplot(points, ggplot2::aes(x = PC1, y = PC2,
                                           color = Group, fill = Group))
   if (!is.null(p_value)) {
@@ -16,7 +18,8 @@ original_pcoa_plot <- function(points, proportion, p_value = NULL,
       hjust = 1.05, vjust = 1.2, size = 5, family = font_family
     )
   }
-  p <- p + ggplot2::geom_point(size = 2)
+  p <- p + if (is.null(point_alpha)) ggplot2::geom_point(size = point_size) else
+    ggplot2::geom_point(size = point_size, alpha = point_alpha)
   if (ellipse) {
     # stat_ellipse requires >=4 points and a nonsingular 2D covariance matrix.
     good <- vapply(split(points, points$Group, drop = TRUE), function(g) {
@@ -28,8 +31,14 @@ original_pcoa_plot <- function(points, proportion, p_value = NULL,
     ed <- points[as.character(points$Group) %in% names(good)[good], , drop = FALSE]
     if (nrow(ed)) {
       p <- p + ggplot2::stat_ellipse(data = ed, geom = "polygon", type = "t",
-                                    color = NA, alpha = 0.15)
+                                    color = NA, level = ellipse_level,
+                                    alpha = ellipse_alpha)
     }
+  }
+  if (show_sample_labels) {
+    if (!"SampleID" %in% names(points)) stop("SampleID is required for sample labels.")
+    p <- p + ggplot2::geom_text(ggplot2::aes(label = SampleID), vjust = -0.8,
+                                size = 3, family = font_family, show.legend = FALSE)
   }
   p +
     ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "grey40",

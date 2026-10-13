@@ -83,15 +83,19 @@ class GroupStyleTests(unittest.TestCase):
         def command(job, args, cwd, **kwargs):
             calls.append(args)
             self.assertEqual(args[2], str(analysis))
-            actual = json.loads(Path(args[-2]).read_text())
+            actual = json.loads(Path(args[-3]).read_text())
             self.assertEqual(actual['group_order'], style['group_order'])
-            output = Path(args[-1]); output.mkdir(parents=True)
+            plotting = json.loads(Path(args[-1]).read_text())
+            self.assertEqual(plotting['alpha']['plot_type'], 'violin')
+            self.assertEqual(plotting['general']['dpi'], 144)
+            output = Path(args[-2]); output.mkdir(parents=True)
             (output / 'render_summary.json').write_text(json.dumps({'fixture': True}))
         job = {'status': 'running'}
         with patch.object(app, 'q') as qiime, patch.object(app, 'command', side_effect=command), \
              patch.object(app, 'r_command', side_effect=lambda config, *args: ['Rscript', *args]), \
              patch.object(app, 'r_execution_env', return_value={}):
-            app.worker(job, 'diversity-render', dict(style, diversity_run=str(analysis)))
+            app.worker(job, 'diversity-render', dict(style, diversity_run=str(analysis),
+                       plot_settings={'alpha': {'plot_type': 'violin'}, 'general': {'dpi': 144}}))
         self.assertEqual(job['status'], 'done', job.get('error'))
         qiime.assert_not_called(); self.assertEqual(len(calls), 1)
         for file, data in original.items(): self.assertEqual(file.read_bytes(), data)
@@ -139,6 +143,9 @@ class GroupStyleTests(unittest.TestCase):
             self.assertEqual(opts['reference_group'], 'CON')
             self.assertEqual(opts['bubble_high'], '#123456')
             self.assertEqual(opts['group_style']['group_order'], ['LDC', 'HDC', 'CON'])
+            self.assertEqual(opts['plot_settings']['heatmap']['width'], 11)
+            self.assertEqual(opts['plot_settings']['bubble']['max_size'], 8)
+            self.assertEqual(json.loads(Path(cwd, 'plot_settings.json').read_text()), opts['plot_settings'])
             directory = Path(cwd) / '02_differential'; directory.mkdir(exist_ok=True)
             (directory / 'summary.json').write_text(json.dumps({'statistics_refit': False, 'fixture_only': True}))
             output = directory / 'L2_phylum' / 'abundance'; output.mkdir(parents=True)
@@ -150,7 +157,8 @@ class GroupStyleTests(unittest.TestCase):
              patch.object(app, 'r_command', side_effect=lambda config, *args: ['Rscript', *args]), \
              patch.object(app, 'r_execution_env', return_value={}):
             app.worker(job, 'differential-render', {'differential_run': str(analysis), 'group_order': ['LDC', 'HDC', 'CON'],
-                                                 'bubble_high': '#123456', 'diff_alpha': '.99'})
+                                                 'bubble_high': '#123456', 'diff_alpha': '.99',
+                                                 'plot_settings': {'heatmap': {'width': 11}, 'bubble': {'max_size': 8}}})
         self.assertEqual(job['status'], 'done', job.get('error'))
         qiime.assert_not_called(); model.assert_not_called(); self.assertEqual(len(calls), 1)
         for filename, data in original.items(): self.assertEqual(filename.read_bytes(), data)

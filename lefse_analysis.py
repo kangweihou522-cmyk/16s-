@@ -14,6 +14,7 @@ from pathlib import Path
 
 from execution_record import capture_source
 from group_style import resolve_group_style
+from plot_settings import resolve_plot_settings
 from run_layout import artifact_path
 
 RANKS = ('k', 'p', 'c', 'o', 'f', 'g', 's')
@@ -291,21 +292,32 @@ from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-folder=Path(sys.argv[1]);threshold=float(sys.argv[2])
-status=sys.argv[3]
+folder=Path(sys.argv[1]);threshold=float(sys.argv[2]);status=sys.argv[3]
+settings=json.loads(Path(sys.argv[4]).read_text(encoding='utf8')) if len(sys.argv)>4 else {}
+general=settings.get('general',{}); formats=('png','svg','pdf') if general.get('formats')=='png_svg_pdf' else ('png','svg')
+if general.get('base_size') is not None: matplotlib.rcParams['font.size']=general['base_size']
+if general.get('font_family','original')!='original':
+    from matplotlib.font_manager import findfont,FontProperties
+    findfont(FontProperties(family=[general['font_family']]),fallback_to_default=False)
+    matplotlib.rcParams['font.family']=[general['font_family']]
+matplotlib.rcParams['svg.fonttype']='none'
 for kind,title in [('bar','LEfSe LDA scores'),('cladogram','LEfSe taxonomy cladogram')]:
-    figure,axis=plt.subplots(figsize=(8,4.5));axis.axis('off')
-    axis.set_title(title)
+    profile=settings.get('lefse_'+kind,{})
+    figure,axis=plt.subplots(figsize=(profile.get('width') or 8,profile.get('height') or 4.5));axis.axis('off')
+    title=(profile.get('title') or title).replace('{threshold}',str(threshold))
+    axis.set_title(title,fontsize=general.get('title_size') or general.get('base_size'))
     axis.text(.5,.55,'No biomarkers above LDA threshold '+str(threshold),ha='center',va='center',transform=axis.transAxes)
     note='No variable known taxa; statistical analysis skipped' if status.startswith('skipped') else 'Saved analysis; no statistical refit'
-    axis.text(.5,.4,note,ha='center',va='center',transform=axis.transAxes,color='#555555')
-    for extension in ('png','svg'): figure.savefig(folder/(kind+'.'+extension),format=extension,dpi=160,bbox_inches='tight')
+    if general.get('show_caption',True): axis.text(.5,.4,note,ha='center',va='center',transform=axis.transAxes,color='#555555')
+    for extension in formats:
+        figure.savefig(folder/(kind+'.'+extension),format=extension,dpi=general.get('dpi') or 160,bbox_inches='tight',
+                       transparent=general.get('background')=='transparent')
     plt.close(figure)
 """
 
 OFFICIAL_PLOT_SCRIPT = """# Presentation adapter for the installed official LEfSe plotter, not a model fit.
-# Only group-order expressions and colors/legend labels change. Taxonomy layout,
-# saved LDA scores, and the official plotting functions remain in use.
+# Apply display controls, named group colors/order, and Python 3 vertical-plot compatibility.
+# Saved LDA scores and the official taxonomy/plotting functions remain in use.
 import ast,hashlib,importlib.util,json,sys
 from pathlib import Path
 import matplotlib
@@ -315,6 +327,8 @@ from matplotlib.axes import Axes
 
 kind,style_file=sys.argv[1:3]
 style=json.loads(Path(style_file).read_text(encoding='utf8'))
+settings=style.get('plot_settings',{}); general=settings.get('general',{}); profile=settings.get('lefse_'+kind,{})
+orientation=profile.get('orientation','horizontal') if kind=='bar' else None
 original_order=style['group_order']; groups=style['groups']
 safe_order=[groups[name] for name in original_order]
 positions={name:i for i,name in enumerate(safe_order)}
@@ -336,49 +350,140 @@ targets={ast.dump(ast.parse(expr,mode='eval').body) for expr in
          ("params['all_feats'].split(':')", "data['cls']", "tree['classes']")}
 class GroupSortAdapter(ast.NodeTransformer):
     count=0
+    vertical=False
+    def visit_FunctionDef(self,node):
+        previous=self.vertical; self.vertical=node.name=='plot_histo_ver'
+        self.generic_visit(node); self.vertical=previous
+        return node
+    def visit_Subscript(self,node):
+        self.generic_visit(node)
+        # Official 1.1.2's vertical plot uses zip(...)[1], invalid in Python 3.
+        if self.vertical and isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Name) and node.value.func.id=='zip':
+            node.value=ast.copy_location(ast.Call(func=ast.Name(id='list',ctx=ast.Load()),args=[node.value],keywords=[]),node.value)
+        return node
+    def visit_Assign(self,node):
+        self.generic_visit(node)
+        if self.vertical and any(isinstance(target,ast.Name) and target.id=='nam' for target in node.targets):
+            node.value=ast.copy_location(ast.parse("['.'.join(d[0].split('.')[-params['n_scl']:]) for d in data['rows']]",mode='eval').body,node.value)
+        return node
     def visit_Call(self,node):
         self.generic_visit(node)
         if (isinstance(node.func,ast.Name) and node.func.id=='sorted' and
             len(node.args)==1 and not node.keywords and ast.dump(node.args[0]) in targets):
             node.func=ast.copy_location(ast.Name(id='_workstation_group_order',ctx=ast.Load()),node.func)
             self.count+=1
+        if self.vertical and isinstance(node.func,ast.Attribute) and node.func.attr=='sort' and any(k.arg=='key' for k in node.keywords):
+            # Keep group blocks ordered even when an LDA score exceeds log abundance.
+            for item in node.keywords:
+                if item.arg=='key': item.value=ast.copy_location(ast.parse("lambda ab: (_workstation_positions[ab[2]], abs(float(ab[3])))",mode='eval').body,item.value)
         return node
 adapter=GroupSortAdapter(); tree=adapter.visit(ast.parse(source,filename=str(source_path)))
 if adapter.count<2: raise ValueError('This official LEfSe plot version cannot apply the requested group order safely')
 namespace={'__name__':'workstation_official_lefse_plot','__file__':str(source_path)}
 exec(compile(ast.fix_missing_locations(tree),str(source_path),'exec'),namespace)
 namespace['_workstation_group_order']=group_order
+namespace['_workstation_positions']=positions
 namespace['colors']=palette
 if kind=='cladogram': namespace['dark_colors']=palette
+if kind=='bar' and orientation=='vertical':
+    original_read=namespace['read_data']
+    def ordered_data(*args,**kwargs):
+        data=original_read(*args,**kwargs); data['cls']=list(safe_order)
+        return data
+    namespace['read_data']=ordered_data
+runtime_parameters={}; effective_canvas={}
+original_params=namespace['read_params']
+def visual_params(*args,**kwargs):
+    params=original_params(*args,**kwargs)
+    if kind=='bar':
+        size=profile.get('feature_font_size') or general.get('base_size')
+        if size is not None: params['feature_font_size']=size
+        # Official vertical function interprets rs as a coordinate, while its
+        # CLI (and horizontal function) use the right margin proportion.
+        if params.get('orientation')=='v': params['rs']=1-params['rs']
+    runtime_parameters.update(params)
+    return params
+namespace['read_params']=visual_params
+if general.get('base_size') is not None: matplotlib.rcParams['font.size']=general['base_size']
+if general.get('font_family','original')!='original':
+    from matplotlib.font_manager import findfont,FontProperties
+    findfont(FontProperties(family=[general['font_family']]),fallback_to_default=False)
+    matplotlib.rcParams['font.family']=[general['font_family']]
 
 original_legend=Axes.legend
 def ordered_legend(axis,*args,**kwargs):
     if len(args)>=2: handles,labels=args[:2]; extra=args[2:]
     elif not args: handles,labels=axis.get_legend_handles_labels(); extra=()
     else: return original_legend(axis,*args,**kwargs)
-    if labels and all(label in original_names for label in labels):
+    grouped=bool(labels) and all(label in original_names for label in labels)
+    if grouped:
         pairs=sorted(zip(handles,labels),key=lambda pair:positions[pair[1]])
         handles=[pair[0] for pair in pairs]
         labels=[original_names[pair[1]] for pair in pairs]
-        return original_legend(axis,handles,labels,*extra,**kwargs)
-    return original_legend(axis,*args,**kwargs)
+    legend_size=(profile.get('class_font_size') if grouped else None) or general.get('legend_text_size') or general.get('base_size')
+    if legend_size is not None: kwargs['prop']={'size':legend_size}
+    position=general.get('legend_position','original')
+    if position=='right':
+        kwargs.update(loc='upper left',bbox_to_anchor=(1.02,1 if grouped else max(.2,.9-.055*len(safe_order))))
+        kwargs['ncol']=1
+    elif position=='bottom' and grouped:
+        kwargs.update(loc='upper center',bbox_to_anchor=(.5,-.16),ncol=max(1,len(labels)))
+    legend=original_legend(axis,handles,labels,*extra,**kwargs)
+    if position=='none': legend.set_visible(False)
+    return legend
 Axes.legend=ordered_legend
 
 # Horizontal bar groups follow the chosen order from top to bottom.
 original_savefig=plt.savefig
 def ordered_savefig(*args,**kwargs):
-    if kind=='bar':
-        for axis in plt.gcf().axes: axis.invert_yaxis()
+    figure=plt.gcf()
+    width,height=figure.get_size_inches()
+    figure.set_size_inches(profile.get('width') or width,profile.get('height') or height,forward=True)
+    actual_width,actual_height=figure.get_size_inches()
+    effective_canvas.update(width=float(actual_width),height=float(actual_height),dpi=kwargs.get('dpi'),
+                            font_family=list(matplotlib.rcParams['font.family']),base_size=matplotlib.rcParams['font.size'])
+    for axis in figure.axes:
+        if kind=='bar' and orientation=='horizontal': axis.invert_yaxis()
+        if kind=='bar' and orientation=='vertical' and axis.get_legend() is None: axis.legend()
+        if profile.get('x_label'): axis.set_xlabel(profile['x_label'])
+        if profile.get('y_label'): axis.set_ylabel(profile['y_label'])
+        tick_size=general.get('axis_text_size') or general.get('base_size')
+        if tick_size is not None: axis.tick_params(labelsize=tick_size)
+        if kind=='bar' and orientation=='vertical' and profile.get('feature_font_size') is not None:
+            axis.tick_params(axis='x',labelsize=profile['feature_font_size'])
+        theme=general.get('theme','original')
+        if theme!='original':
+            axis.set_frame_on(theme!='minimal')
+            for name,spine in axis.spines.items(): spine.set_visible(theme=='bw' or (theme=='classic' and name in ('left','bottom')))
+            if theme=='classic': axis.grid(False)
+            else: axis.grid(True,color='#DDDDDD',linewidth=.5)
+        if kind=='bar' and profile.get('top_n',0) and general.get('show_caption',True):
+            figure.text(.5,.01,'Display up to top '+str(profile['top_n'])+' biomarkers by |LDA|; saved analysis unchanged',ha='center',fontsize=general.get('axis_text_size') or 8)
+    if general.get('background')=='transparent': kwargs.update(transparent=True,facecolor='none',edgecolor='none')
+    if general.get('legend_position','original')!='original': kwargs['bbox_inches']='tight'
     return original_savefig(*args,**kwargs)
 plt.savefig=ordered_savefig
 matplotlib.rcParams['svg.fonttype']='none'
 sys.argv=[name,*sys.argv[3:]]
-namespace['plot_res' if kind=='bar' else 'plot_cladogram']()
+display_empty=False
+if kind=='cladogram' and profile.get('max_level') is not None:
+    lines=Path(sys.argv[1]).read_text(encoding='utf8').splitlines()
+    display_empty=not any(line.strip() and line.split()[0].count('.')<profile['max_level'] for line in lines)
+if display_empty:
+    params=namespace['read_params'](sys.argv)
+    figure,axis=plt.subplots(); axis.axis('off')
+    axis.set_title(params['title'],fontsize=general.get('title_size') or general.get('base_size'))
+    axis.text(.5,.5,'No taxa available at the selected display level',ha='center',va='center',transform=axis.transAxes)
+    plt.savefig(params['output_file'],format=params['format'],dpi=params['dpi']); plt.close(figure)
+else: namespace['plot_res' if kind=='bar' else 'plot_cladogram']()
 Path(sys.argv[2]+'.style.json').write_text(json.dumps({
     'official_module':name,'official_source':str(source_path),
     'official_source_sha256':hashlib.sha256(source).hexdigest(),
     'presentation_group_sort_adaptations':adapter.count,
     'group_order':original_order,'group_colors':style['group_colors'],
+    'plot_settings':settings,'orientation':orientation,
+    'official_parameters':runtime_parameters,'effective_canvas':effective_canvas,
+    'empty_display_level':display_empty,
     'statistics_refit':False},ensure_ascii=False,indent=2)+'\\n',encoding='utf8')
 """
 
@@ -420,6 +525,37 @@ def filter_results(results, threshold):
             row[2:4] = ['', '']
         rows.append(row)
     return rows, selected
+
+
+def _plot_options(kind, settings, threshold, class_order):
+    """Official supported CLI parameters; figure/layout overrides live in the adapter."""
+    general, profile = settings['general'], settings['lefse_' + kind]
+    title = profile['title'] or ('LEfSe LDA scores' if kind == 'bar' else 'LEfSe taxonomy cladogram') + ' (LDA > ' + str(threshold) + ')'
+    options = ['--dpi', str(general['dpi'] or 160), '--title', title.replace('{threshold}', str(threshold)),
+               '--all_feats', class_order]
+    title_size = general['title_size'] or general['base_size']
+    if title_size is not None:
+        options += ['--title_font_size', str(title_size)]
+    class_size = profile.get('class_font_size') or general['legend_text_size'] or general['base_size']
+    if class_size is not None:
+        options += ['--class_legend_font_size', str(class_size)]
+    if kind == 'bar':
+        options += ['--subclades', str(profile['label_levels']), '--max_feature_len', '10000',
+                    '--orientation', 'v' if profile['orientation'] == 'vertical' else 'h']
+        fields = {'width': '--width', 'height': '--height'}
+        feature_size = profile['feature_font_size'] or general['base_size']
+        if feature_size is not None:
+            # The official CLI declares this flag as int; adapter retains any fractional size.
+            options += ['--feature_font_size', str(round(feature_size))]
+    else:
+        fields = {'max_level': '--max_lev', 'min_point_size': '--min_point_size', 'max_point_size': '--max_point_size'}
+        feature_size = profile['label_font_size'] or general['base_size']
+        if feature_size is not None:
+            options += ['--label_font_size', str(feature_size)]
+    for field, flag in fields.items():
+        if profile[field] is not None:
+            options += [flag, str(profile[field])]
+    return options
 
 
 def _save_input(run, counts, totals, samples, data):
@@ -470,6 +606,7 @@ def run_lefse(job, config, saved, parent, api):
     samples = _samples(saved.get('samples', []))
     style = resolve_group_style(config, samples, fallback=saved)
     _json(run / 'group_style.json', style)
+    _json(run / 'plot_settings.json', resolve_plot_settings(config, fallback=saved))
     api.begin_stage(job, '01_inputs', 'LEfSe：未抽平计数、分组与分类输入', settings)
     counts, totals = read_counts(artifact_path(parent, 'exported-table/feature-table.tsv'), samples)
     taxonomy = read_taxonomy(artifact_path(parent, 'exported-taxonomy/taxonomy.tsv'), counts)
@@ -548,11 +685,16 @@ def render_lefse(job, config, analysis, api):
                 else status.get('group_style') or saved.get('config', {}))
     style = resolve_group_style(config, [{'Group': group} for group in status['groups']], fallback=fallback)
     _json(output / 'group_style.json', style)
+    visual_file = analysis / 'plot_settings.json'
+    visual_fallback = (json.loads(visual_file.read_text(encoding='utf8')) if visual_file.is_file()
+                       else saved.get('config', {}))
+    visual = resolve_plot_settings(config, fallback=visual_fallback)
+    _json(output / 'plot_settings.json', visual)
     runtime_config = {**saved.get('config', {}), **status['settings']}
     if config.get('conda'):
         runtime_config['conda'] = config['conda']
     api.begin_stage(job, '03_figures', 'LEfSe：从保存分数筛选并绘图',
-                    {'lda_threshold': threshold, 'statistics_refit': False, **style})
+                    {'lda_threshold': threshold, 'statistics_refit': False, 'plot_settings': visual, **style})
     folder = output / '03_figures'
     folder.mkdir(exist_ok=True)
     plot_result = folder / 'threshold_results.res'
@@ -561,24 +703,30 @@ def render_lefse(job, config, analysis, api):
     runtime = _runtime(job, runtime_config, api, ('bar', 'cladogram'))
     _json(folder / 'runtime.json', runtime)
     prefix = _prefix(runtime_config, api)
-    figures = {kind + '_' + ext: str(folder / (kind + '.' + ext)) for kind in ('bar', 'cladogram') for ext in ('png', 'svg')}
+    formats = ('png', 'svg', 'pdf') if visual['general']['formats'] == 'png_svg_pdf' else ('png', 'svg')
+    figures = {kind + '_' + ext: str(folder / (kind + '.' + ext)) for kind in ('bar', 'cladogram') for ext in formats}
+    top_n = visual['lefse_bar']['top_n']
+    bar_selected = (sorted(selected, key=lambda row: (-abs(row['lda_score']), row['feature']))[:top_n]
+                    if top_n else selected)
+    bar_result = plot_result
+    if selected and top_n:
+        bar_result = folder / 'bar_display_results.res'
+        with bar_result.open('w', encoding='utf8', newline='') as stream:
+            csv.writer(stream, delimiter='\t').writerows(row['raw'] for row in bar_selected)
     if selected:
         class_order = ':'.join(status['groups'][group] for group in style['group_order'])
-        _json(folder / 'plot_style.json', {**style, 'groups': status['groups']})
+        _json(folder / 'plot_style.json', {**style, 'groups': status['groups'], 'plot_settings': visual})
         script = _script(folder / 'render_official.py', OFFICIAL_PLOT_SCRIPT, job)
         for kind in ('bar', 'cladogram'):
-            for ext in ('png', 'svg'):
-                title = ('LEfSe LDA scores' if kind == 'bar' else 'LEfSe taxonomy cladogram') + ' (LDA > ' + str(threshold) + ')'
+            for ext in formats:
                 args = prefix + ['python', script, kind, str(folder / 'plot_style.json'),
-                                 str(plot_result), figures[kind + '_' + ext],
-                                 '--format', ext, '--dpi', '160', '--title', title, '--all_feats', class_order]
-                if kind == 'bar':
-                    # Two final lineage segments distinguish duplicate genera/species.
-                    args += ['--subclades', '2', '--max_feature_len', '10000']
+                                 str(bar_result if kind == 'bar' else plot_result), figures[kind + '_' + ext],
+                                 '--format', ext, *_plot_options(kind, visual, threshold, class_order)]
                 api.command(job, args, output)
     else:
         script = _script(folder / 'render_empty.py', EMPTY_PLOT_SCRIPT, job)
-        api.command(job, prefix + ['python', script, str(folder), str(threshold), status['statistics']], output)
+        api.command(job, prefix + ['python', script, str(folder), str(threshold), status['statistics'],
+                                  str(output / 'plot_settings.json')], output)
     for filename in figures.values():
         path = Path(filename)
         if not path.is_file() or path.stat().st_size == 0:
@@ -586,12 +734,15 @@ def render_lefse(job, config, analysis, api):
     summary = {'lefse_run': str(analysis), 'render_run': str(output), 'lda_threshold': threshold,
                'biomarker_count': len(selected), 'statistics_refit': False, 'figures': figures,
                'result_sha256': status['result_sha256'], 'no_hits': not selected,
-               'statistics_status': status['statistics'], **style}
+               'statistics_status': status['statistics'], 'plot_settings': visual,
+               'bar_biomarker_count': len(bar_selected), 'bar_display_top_n': top_n,
+               'cladogram_uses_full_threshold_selection': True, **style}
     _json(folder / 'render_summary.json', summary)
     api.finish_stage(job, summary, ['柱图与分类层级 cladogram 来自同一份原始 LDA 缓存与当前筛选阈值。',
                                    'cladogram 表示分类注释层级，不是序列系统发育树。',
                                    '阈值调整只改变显示，不重新计算 P 值或优化显著性；没有命中时生成明确提示图。',
                                    '分组配色与图例顺序使用当前统一设置；LDA 柱图按指定分组从上到下排列。改变配色或顺序仅重绘，保留原始统计结果。',
+                                   '柱图的 Top N 仅按当前阈值命中的绝对 LDA 分数筛选展示；cladogram 仍使用完整阈值结果。字号、方向、主题、尺寸和显示层级只改变图形。',
                                    '名称与原始 Group / 分类的对应关系见原分析 01_inputs/*_mapping.tsv。'])
     job['result'] = summary
     return summary

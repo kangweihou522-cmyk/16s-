@@ -69,7 +69,10 @@ effect_group_style <- function(actual, requested = NULL) {
   list(group_order = order, group_colors = colors[order])
 }
 
-plot_effects <- function(res, directory, reference, font, group_style = NULL) {
+plot_effects <- function(res, directory, reference, font, group_style = NULL, plot_settings = NULL) {
+  opts <- list(font = font, plot_settings = plot_settings)
+  font <- diff_plot_font(opts); opts$font <- font
+  point <- diff_plot_config(opts, 'effect')$profile
   fields <- if (is.null(res) || !'taxon' %in% names(res)) character() else grep('^lfc_Group', names(res), value = TRUE)
   targets <- sub('^lfc_Group', '', fields)
   style <- effect_group_style(unique(c(reference, targets)), group_style)
@@ -91,30 +94,24 @@ plot_effects <- function(res, directory, reference, font, group_style = NULL) {
     dat$taxon <- factor(dat$taxon, levels = rev(dat$taxon))
     write_result(dat, file.path(directory, paste0('effect_', i, '_plot_input.tsv')))
     fig <- ggplot2::ggplot(dat, ggplot2::aes(x = lfc, y = taxon, color = direction_group)) +
-      ggplot2::geom_vline(xintercept = 0, color = 'grey70') +
-      ggplot2::geom_segment(ggplot2::aes(x = lfc - se, xend = lfc + se, yend = taxon)) +
-      ggplot2::geom_point(size = 2) +
+      ggplot2::geom_vline(xintercept = 0, color = 'grey70')
+    if (isTRUE(point$show_errorbars)) fig <- fig + ggplot2::geom_segment(ggplot2::aes(x = lfc - se, xend = lfc + se, yend = taxon))
+    fig <- fig + ggplot2::geom_point(size = if (is.null(point$point_size)) 2 else point$point_size) +
       ggplot2::scale_color_manual(values = style$group_colors, breaks = present, na.value = '#777777') +
-      ggplot2::labs(x = 'ANCOM-BC2 log fold change (± SE)', y = NULL, color = 'Effect direction',
+      ggplot2::labs(x = if (isTRUE(point$show_errorbars)) 'ANCOM-BC2 log fold change (± SE)' else 'ANCOM-BC2 log fold change', y = NULL, color = 'Effect direction',
                     title = paste(target, 'versus', reference),
                     caption = paste0('Positive: ', target, ' − ', reference,
                                      '; negative: reference is higher; zero effect is gray. Adjusted q-values remain in the exported tables.')) +
       ggplot2::theme_bw(base_family = font) + ggplot2::theme(axis.text.y = ggplot2::element_text(size = 8))
-    for (ext in c('png', 'svg')) {
-      name <- file.path(directory, paste0('effect_', i, '.', ext))
-      ggplot2::ggsave(name, fig, width = 12, height = max(4, nrow(dat) * .25), dpi = 200)
-      plots <- c(plots, name)
-    }
+    plots <- c(plots, save_differential_figure(fig, file.path(directory, paste0('effect_', i)),
+                                             height = max(4, nrow(dat) * .25), opts = opts, comparison = paste(target, 'versus', reference)))
   }
   if (!length(plots)) {
     fig <- ggplot2::ggplot() + ggplot2::annotate('text', x = 0, y = 0,
              label = 'No estimable finite Group effects.\nInspect model results, structural zeros and warnings.', family = font) +
       ggplot2::theme_void() + ggplot2::labs(title = 'ANCOM-BC2')
-    for (ext in c('png', 'svg')) {
-      filename <- file.path(directory, paste0('no_estimable_effects.', ext))
-      ggplot2::ggsave(filename, fig, width = 10, height = 4, dpi = 200)
-      plots <- c(plots, filename)
-    }
+    attr(fig, 'differential_no_hit') <- TRUE
+    plots <- c(plots, save_differential_figure(fig, file.path(directory, 'no_estimable_effects'), width = 10, height = 4, opts = opts))
   }
   plots
 }
@@ -137,16 +134,110 @@ visual_options <- function(opts) {
   defaults
 }
 
-save_differential_figure <- function(fig, stem, width = 12, height = 5) {
+diff_plot_config <- function(opts = NULL, profile = 'effect') {
+  requested <- if (is.null(opts$plot_settings)) list() else opts$plot_settings
+  general <- list(dpi = NULL, font_family = 'original', base_size = NULL, title_size = NULL, axis_text_size = NULL,
+                  legend_text_size = NULL, legend_position = 'original', theme = 'original',
+                  background = 'white', show_caption = TRUE, formats = 'original')
+  specific <- list(width = NULL, height = NULL, title = '', x_label = '', y_label = '')
+  if (profile == 'heatmap') specific <- c(specific, list(label_size = NULL, row_order = 'abundance', show_values = FALSE))
+  if (profile == 'bubble') specific <- c(specific, list(max_size = NULL, point_alpha = .9, show_values = FALSE))
+  if (profile == 'effect') specific <- c(specific, list(point_size = NULL, show_errorbars = TRUE))
+  for (key in names(general)) if (!is.null(requested$general[[key]])) general[[key]] <- requested$general[[key]]
+  for (key in names(specific)) if (!is.null(requested[[profile]][[key]])) specific[[key]] <- requested[[profile]][[key]]
+  list(general = general, profile = specific, requested = requested)
+}
+
+diff_plot_font <- function(opts) {
+  selected <- diff_plot_config(opts)$general$font_family
+  if (selected == 'original') return(if (is.null(opts$font)) 'sans' else opts$font)
+  if (!requireNamespace('systemfonts', quietly = TRUE) || !selected %in% systemfonts::system_fonts()$family)
+    stop('Selected plot font is not installed in this R environment: ', selected)
+  selected
+}
+
+diff_label <- function(value, rank, comparison) {
+  gsub('{comparison}', comparison, gsub('{rank}', rank, value, fixed = TRUE), fixed = TRUE)
+}
+
+style_differential_figure <- function(fig, config, font = 'sans', rank = '', comparison = '') {
+  general <- config$general; profile <- config$profile
+  no_hit <- isTRUE(attr(fig, 'differential_no_hit'))
+  if (general$theme != 'original') {
+    theme <- switch(general$theme, classic = ggplot2::theme_classic, minimal = ggplot2::theme_minimal, bw = ggplot2::theme_bw)
+    if (is.null(theme)) stop('Invalid plot theme')
+    # Preserve geometry layout safeguards while replacing the requested visual theme.
+    original <- fig$theme
+    fig <- fig + theme(base_size = if (is.null(general$base_size)) 11 else general$base_size, base_family = font)
+    if (!is.null(original$axis.text.x)) fig <- fig + ggplot2::theme(axis.text.x = original$axis.text.x)
+    if (!is.null(original$axis.text.y)) fig <- fig + ggplot2::theme(axis.text.y = original$axis.text.y)
+    for (key in c('plot.margin', 'legend.key.height', 'legend.spacing.y', 'legend.position'))
+      if (!is.null(original[[key]])) fig <- fig + do.call(ggplot2::theme, setNames(list(original[[key]]), key))
+  }
+  if (!is.null(general$base_size)) fig <- fig + ggplot2::theme(text = ggplot2::element_text(size = general$base_size))
+  if (general$font_family != 'original') fig <- fig + ggplot2::theme(text = ggplot2::element_text(family = font))
+  if (!is.null(general$title_size)) fig <- fig + ggplot2::theme(plot.title = ggplot2::element_text(size = general$title_size))
+  if (!is.null(general$axis_text_size)) fig <- fig + ggplot2::theme(axis.text.x = ggplot2::element_text(size = general$axis_text_size),
+                                                               axis.text.y = ggplot2::element_text(size = general$axis_text_size))
+  if (!is.null(general$legend_text_size)) fig <- fig + ggplot2::theme(legend.text = ggplot2::element_text(size = general$legend_text_size))
+  if (!is.null(profile$label_size)) fig <- fig + ggplot2::theme(axis.text.y = ggplot2::element_text(size = profile$label_size))
+  if (general$legend_position != 'original') fig <- fig + ggplot2::theme(legend.position = general$legend_position)
+  if (general$background == 'transparent') fig <- fig + ggplot2::theme(
+    plot.background = ggplot2::element_rect(fill = 'transparent', color = NA),
+    panel.background = ggplot2::element_rect(fill = 'transparent', color = NA),
+    legend.background = ggplot2::element_rect(fill = 'transparent', color = NA),
+    legend.box.background = ggplot2::element_rect(fill = 'transparent', color = NA),
+    legend.key = ggplot2::element_rect(fill = 'transparent', color = NA))
+  if (!isTRUE(general$show_caption)) fig <- fig + ggplot2::labs(caption = NULL, subtitle = NULL)
+  for (key in c('title', 'x_label', 'y_label')) if (nzchar(profile[[key]])) {
+    label <- if (key == 'x_label') 'x' else if (key == 'y_label') 'y' else 'title'
+    fig <- fig + do.call(ggplot2::labs, setNames(list(diff_label(profile[[key]], rank, comparison)), label))
+  }
+  if (no_hit) fig <- fig + ggplot2::theme(axis.text = ggplot2::element_blank(), axis.ticks = ggplot2::element_blank(),
+                                         axis.title = ggplot2::element_blank(), panel.grid = ggplot2::element_blank())
+  fig
+}
+
+save_differential_figure <- function(fig, stem, width = 12, height = 5, opts = NULL,
+                                     profile = 'effect', rank = '', comparison = '') {
   dir.create(dirname(stem), recursive = TRUE, showWarnings = FALSE)
-  files <- paste0(stem, c('.png', '.svg'))
-  for (file in files) ggplot2::ggsave(file, fig, width = width, height = height, dpi = 200, bg = 'white')
+  config <- diff_plot_config(opts, profile); general <- config$general
+  font <- diff_plot_font(opts)
+  fig <- style_differential_figure(fig, config, font, rank, comparison)
+  if (!is.null(config$profile$width)) width <- config$profile$width
+  if (!is.null(config$profile$height)) height <- config$profile$height
+  dpi <- if (is.null(general$dpi)) 200 else general$dpi
+  formats <- if (general$formats == 'png_svg_pdf') c('png', 'svg', 'pdf') else c('png', 'svg')
+  files <- paste0(stem, '.', formats)
+  for (file in files) {
+    arguments <- list(filename = file, plot = fig, width = width, height = height, dpi = dpi, bg = general$background)
+    if (endsWith(file, '.pdf')) {
+      if (!capabilities('cairo')) stop('Cairo graphics are required for font-compatible PDF figures')
+      arguments$device <- grDevices::cairo_pdf
+    }
+    do.call(ggplot2::ggsave, arguments)
+  }
+  effective <- list(profile = profile, width = width, height = height, dpi = dpi, formats = as.list(formats),
+                    background = general$background, font = font,
+                    general = general, profile_settings = config$profile,
+                    labels = as.list(fig$labels[c('title', 'x', 'y', 'caption', 'subtitle')]),
+                    rank = rank, comparison = comparison,
+                    null_settings = 'Null sizing/font controls preserve the existing figure defaults')
+  effective$legend_position <- fig$theme$legend.position
+  if (profile == 'bubble' && is.null(effective$profile_settings$max_size)) effective$profile_settings$max_size <- 10
+  if (profile == 'effect' && is.null(effective$profile_settings$point_size)) effective$profile_settings$point_size <- 2
+  if (profile == 'heatmap' && is.null(effective$profile_settings$label_size)) effective$profile_settings$label_size <- 8
+  jsonlite::write_json(list(requested = config$requested, effective = effective), paste0(stem, '_plot_settings.json'),
+                       pretty = TRUE, auto_unbox = TRUE, null = 'null')
+  attr(files, 'plot_settings') <- effective
   files
 }
 
 empty_differential_figure <- function(title, message, font) {
-  ggplot2::ggplot() + ggplot2::annotate('text', x = 0, y = 0, label = paste(strwrap(message, 85), collapse = '\n'), family = font) +
+  fig <- ggplot2::ggplot() + ggplot2::annotate('text', x = 0, y = 0, label = paste(strwrap(message, 85), collapse = '\n'), family = font) +
     ggplot2::theme_void() + ggplot2::labs(title = title)
+  attr(fig, 'differential_no_hit') <- TRUE
+  fig
 }
 
 official_contrast_map <- function(meta, reference) {
@@ -233,33 +324,39 @@ plot_actual_comparison <- function(dat, folder, contrast, style, opts) {
   model$direction_group <- factor(model$direction_group, levels = style$group_order)
   write_result(model, file.path(folder, 'effect_plot_input.tsv'))
   title <- paste(contrast$positive_group, 'versus', contrast$negative_group)
+  point <- diff_plot_config(opts, 'effect')$profile
   if (!nrow(model)) {
     fig <- empty_differential_figure(title, 'No robust significant taxa with finite model effects. Structural-zero findings, if present, have no model LFC/q and are shown in abundance plots and comparison.tsv.', opts$font)
   } else {
     model$taxon <- factor(model$taxon, levels = rev(model$taxon))
     fig <- ggplot2::ggplot(model, ggplot2::aes(lfc, taxon, color = direction_group)) +
-      ggplot2::geom_vline(xintercept = 0, color = 'grey70') +
-      ggplot2::geom_segment(ggplot2::aes(x = lfc - se, xend = lfc + se, yend = taxon)) + ggplot2::geom_point(size = 2) +
+      ggplot2::geom_vline(xintercept = 0, color = 'grey70')
+    if (isTRUE(point$show_errorbars)) fig <- fig + ggplot2::geom_segment(ggplot2::aes(x = lfc - se, xend = lfc + se, yend = taxon))
+    fig <- fig + ggplot2::geom_point(size = if (is.null(point$point_size)) 2 else point$point_size) +
       ggplot2::scale_color_manual(values = style$group_colors, breaks = style$group_order, na.value = '#777777') +
-      ggplot2::labs(title = title, x = 'Official ANCOM-BC2 log fold change (± SE)', y = NULL, color = 'Effect direction',
+      ggplot2::labs(title = title, x = if (isTRUE(point$show_errorbars)) 'Official ANCOM-BC2 log fold change (± SE)' else 'Official ANCOM-BC2 log fold change', y = NULL, color = 'Effect direction',
                     caption = paste(strwrap(paste0('Positive = ', contrast$positive_group, ' − ', contrast$negative_group,
                       '. Robust significant model taxa only; ranked by the original comparison q. Structural-zero findings are separate; no LFC/q was invented.'), 105), collapse = '\n')) +
       ggplot2::theme_bw(base_family = opts$font) + ggplot2::theme(axis.text.y = ggplot2::element_text(size = 8))
   }
-  files <- save_differential_figure(fig, file.path(folder, 'effect'), height = max(4, nrow(model) * .25 + 1))
+  files <- save_differential_figure(fig, file.path(folder, 'effect'), height = max(4, nrow(model) * .25 + 1),
+                                     opts = opts, profile = 'effect', rank = if (is.null(opts$plot_rank)) '' else opts$plot_rank, comparison = title)
   info <- list(contrast = contrast$key, positive_group = contrast$positive_group, negative_group = contrast$negative_group,
                sign = paste(contrast$positive_group, 'minus', contrast$negative_group),
                model_result_source = contrast$result_source, model_robust_taxa = sum(dat$robust_significant),
                structural_zero_findings = sum(dat$source == 'structural_zero_presence_absence'),
-               effect_shown = nrow(model), q_recomputed = FALSE, files = files)
+               effect_shown = nrow(model), q_recomputed = FALSE, files = files,
+               plot_settings = attr(files, 'plot_settings'))
   jsonlite::write_json(info, file.path(folder, 'comparison.json'), pretty = TRUE, auto_unbox = TRUE)
   info
 }
 
 plot_abundance_views <- function(counts, meta, findings, folder, opts, title) {
+  opts$font <- diff_plot_font(opts)
   dir.create(folder, recursive = TRUE, showWarnings = FALSE)
   if (!identical(colnames(counts), rownames(meta)) || any(colSums(counts) <= 0)) stop('Abundance counts and actual sample metadata must align with nonzero libraries')
   style <- effect_group_style(levels(meta$Group), opts$group_style)
+  heat_config <- diff_plot_config(opts, 'heatmap'); bubble_config <- diff_plot_config(opts, 'bubble')
   relative <- sweep(counts, 2L, colSums(counts), '/')
   means <- vapply(style$group_order, function(group) rowMeans(relative[, as.character(meta$Group) == group, drop = FALSE]), numeric(nrow(relative)))
   if (!is.matrix(means)) means <- matrix(means, nrow = nrow(relative))
@@ -302,50 +399,71 @@ plot_abundance_views <- function(counts, meta, findings, folder, opts, title) {
                        structural_zero = rep(selected$structural_zero, times = ncol(values)), stringsAsFactors = FALSE)
     long$Group <- factor(long$Group, levels = style$group_order)
     long$heatmap_value <- if (opts$diff_heatmap_scale == 'row_zscore') long$row_zscore else long$mean_percent
-    write_result(long, file.path(folder, 'heatmap_plot_input.tsv')); write_result(long, file.path(folder, 'bubble_plot_input.tsv'))
+    heat_order <- if (heat_config$profile$row_order == 'alphabetical') sort(selected$taxon) else selected$taxon
+    heat_long <- long; heat_long$plot_y <- length(heat_order) - match(heat_long$taxon, heat_order) + 1L
+    heat_labels <- labels[match(heat_order, selected$taxon)]
+    write_result(heat_long, file.path(folder, 'heatmap_plot_input.tsv')); write_result(long, file.path(folder, 'bubble_plot_input.tsv'))
     markers <- data.frame(Group = factor(style$group_order, levels = style$group_order), plot_y = .15)
     common <- ggplot2::theme_bw(base_family = opts$font) + ggplot2::theme(panel.grid = ggplot2::element_blank(),
                  axis.text.y = ggplot2::element_text(size = 8), axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
-    y_scale <- function() ggplot2::scale_y_continuous(breaks = seq_len(nrow(values)), labels = rev(labels),
+    y_scale <- function(axis_labels = labels) ggplot2::scale_y_continuous(breaks = seq_len(nrow(values)), labels = rev(axis_labels),
                                                     limits = c(0, nrow(values) + .5), expand = c(0, 0))
     heat_label <- if (opts$diff_heatmap_scale == 'row_zscore') 'Row Z-score of group means' else 'Group mean relative abundance (%)'
     limit <- if (opts$diff_heatmap_scale == 'row_zscore') max(1, abs(long$row_zscore)) else max(long$mean_percent)
     midpoint <- if (opts$diff_heatmap_scale == 'row_zscore') 0 else limit / 2
-    heat <- ggplot2::ggplot(long, ggplot2::aes(Group, plot_y, fill = heatmap_value)) + ggplot2::geom_tile(width = .95, height = .95) +
+    heat <- ggplot2::ggplot(heat_long, ggplot2::aes(Group, plot_y, fill = heatmap_value)) + ggplot2::geom_tile(width = .95, height = .95) +
       ggplot2::geom_point(data = markers, ggplot2::aes(Group, plot_y, color = Group), inherit.aes = FALSE, shape = 15, size = 3) +
       ggplot2::scale_fill_gradient2(low = opts$heatmap_low, mid = opts$heatmap_mid, high = opts$heatmap_high,
          midpoint = midpoint, limits = if (opts$diff_heatmap_scale == 'row_zscore') c(-limit, limit) else c(0, limit)) +
-      ggplot2::scale_color_manual(values = style$group_colors, breaks = style$group_order) + y_scale() + common +
+      ggplot2::scale_color_manual(values = style$group_colors, breaks = style$group_order) + y_scale(heat_labels) + common +
       ggplot2::labs(title = paste(title, 'abundance heatmap'), x = NULL, y = NULL, fill = heat_label, color = 'Group',
                     caption = paste(strwrap(paste(note, zero_note, if (opts$diff_heatmap_scale == 'row_zscore') 'Constant rows have Z=0; Z-scores do not represent LFC or significance.' else ''), 110), collapse = '\n'))
+    value_size <- if (is.null(heat_config$general$base_size)) 3 else heat_config$general$base_size / (72.27 / 25.4)
+    if (isTRUE(heat_config$profile$show_values)) heat <- heat + ggplot2::geom_text(ggplot2::aes(label = sprintf('%.2f%%', mean_percent)),
+                                                                               size = value_size, family = opts$font, color = 'black')
     bubble <- ggplot2::ggplot(long, ggplot2::aes(Group, plot_y, size = mean_percent))
     if (opts$bubble_color_mode == 'group') {
-      bubble <- bubble + ggplot2::geom_point(ggplot2::aes(color = Group), alpha = .9, stroke = 0) +
+      bubble <- bubble + ggplot2::geom_point(ggplot2::aes(color = Group), alpha = bubble_config$profile$point_alpha, stroke = 0) +
         ggplot2::scale_color_manual(values = style$group_colors, breaks = style$group_order) +
         ggplot2::geom_point(data = markers, ggplot2::aes(Group, plot_y, color = Group), inherit.aes = FALSE, shape = 15, size = 3) +
         ggplot2::labs(color = 'Group')
     } else {
-      bubble <- bubble + ggplot2::geom_point(ggplot2::aes(color = mean_percent), alpha = .9, stroke = 0) +
+      bubble <- bubble + ggplot2::geom_point(ggplot2::aes(color = mean_percent), alpha = bubble_config$profile$point_alpha, stroke = 0) +
         ggplot2::scale_color_gradient(low = opts$bubble_low, high = opts$bubble_high) +
         ggplot2::geom_point(data = markers, ggplot2::aes(Group, plot_y, fill = Group), inherit.aes = FALSE, shape = 21, size = 3, color = 'grey30') +
         ggplot2::scale_fill_manual(values = style$group_colors, breaks = style$group_order) +
         ggplot2::labs(color = 'Group mean (%)', fill = 'Group')
     }
     size_breaks <- unique(signif(max(long$mean_percent) * c(.25, .5, 1), 2))
-    bubble <- bubble + ggplot2::scale_size_area(max_size = 10, breaks = size_breaks) + y_scale() + common +
+    short_bubble <- !is.null(bubble_config$profile$height) && bubble_config$profile$height < 6.5 &&
+      bubble_config$general$legend_position == 'original'
+    bottom_legend <- bubble_config$general$legend_position == 'bottom' || short_bubble
+    bubble <- bubble + ggplot2::scale_size_area(max_size = if (is.null(bubble_config$profile$max_size)) 10 else bubble_config$profile$max_size,
+                                               breaks = size_breaks) + y_scale() + common +
       ggplot2::theme(legend.text = ggplot2::element_text(size = 8), legend.title = ggplot2::element_text(size = 9),
                     legend.key.height = grid::unit(.25, 'cm'), legend.spacing.y = grid::unit(.25, 'cm'),
                     plot.margin = ggplot2::margin(12, 12, 12, 12), plot.caption = ggplot2::element_text(size = 8)) +
-      ggplot2::guides(size = ggplot2::guide_legend(order = 1), fill = ggplot2::guide_legend(order = 2),
-                      color = if (opts$bubble_color_mode == 'group') ggplot2::guide_legend(order = 2) else
-                        ggplot2::guide_colorbar(order = 3, barheight = grid::unit(2.8, 'cm'), barwidth = grid::unit(.4, 'cm'))) +
+      ggplot2::guides(size = ggplot2::guide_legend(order = 1, nrow = if (bottom_legend) 1 else NULL, title.position = 'top'),
+                      fill = ggplot2::guide_legend(order = 2, nrow = if (bottom_legend) 1 else NULL, title.position = 'top'),
+                      color = if (opts$bubble_color_mode == 'group') ggplot2::guide_legend(order = 2, nrow = if (bottom_legend) 1 else NULL, title.position = 'top') else
+                        ggplot2::guide_colorbar(order = 3, direction = if (bottom_legend) 'horizontal' else 'vertical',
+                          title.position = 'top',
+                          barheight = grid::unit(if (bottom_legend) .4 else 2.8, 'cm'),
+                          barwidth = grid::unit(if (bottom_legend) 2.8 else .4, 'cm'))) +
       ggplot2::labs(title = paste(title, 'abundance bubble plot'), x = NULL, y = NULL, size = 'Group mean (%)',
                     caption = paste(strwrap(paste(note, zero_note), 110), collapse = '\n'))
+    if (short_bubble) bubble <- bubble + ggplot2::theme(legend.position = 'bottom')
+    if (isTRUE(bubble_config$profile$show_values)) bubble <- bubble + ggplot2::geom_text(
+      ggplot2::aes(label = sprintf('%.2f%%', mean_percent)), size = value_size, family = opts$font, color = 'black')
   }
   lines <- if (nrow(selected)) max(lengths(strsplit(labels, '\n', fixed = TRUE))) else 1L
   height <- max(5, nrow(selected) * (.17 * lines + .12) + 2)
-  files <- c(save_differential_figure(heat, file.path(folder, 'abundance_heatmap'), height = height),
-             save_differential_figure(bubble, file.path(folder, 'abundance_bubble'), width = 13, height = max(8, height)))
+  rank <- if (is.null(opts$plot_rank)) '' else opts$plot_rank
+  heat_files <- save_differential_figure(heat, file.path(folder, 'abundance_heatmap'), height = height,
+                                        opts = opts, profile = 'heatmap', rank = rank, comparison = 'all groups')
+  bubble_files <- save_differential_figure(bubble, file.path(folder, 'abundance_bubble'), width = 13, height = max(8, height),
+                                          opts = opts, profile = 'bubble', rank = rank, comparison = 'all groups')
+  files <- c(heat_files, bubble_files)
   summary <- list(selected_total = sum(selection$selected_union), model_robust_total = sum(selection$model_robust),
                    omnibus_reject_total = sum(selection$omnibus_reject),
                    structural_zero_total = sum(selection$structural_zero), shown = nrow(selected),
@@ -353,13 +471,16 @@ plot_abundance_views <- function(counts, meta, findings, folder, opts, title) {
                    table_units = 'relative abundance proportions (0 to 1); plot input mean_percent is percent',
                    heatmap_scale = opts$diff_heatmap_scale, bubble_color_mode = opts$bubble_color_mode,
                    group_style = list(group_order = as.list(style$group_order), group_colors = as.list(style$group_colors)),
-                   visual_options = visual_options(opts), notes = c(note, zero_note), plots = files)
+                   visual_options = visual_options(opts), notes = c(note, zero_note), plots = files,
+                   plot_settings = list(heatmap = attr(heat_files, 'plot_settings'), bubble = attr(bubble_files, 'plot_settings')))
   jsonlite::write_json(summary, file.path(folder, 'plot_summary.json'), pretty = TRUE, auto_unbox = TRUE)
   summary
 }
 
-plot_ancom_level <- function(fit, counts, meta, folder, opts, title) {
+plot_ancom_level <- function(fit, counts, meta, folder, opts, title, rank = '') {
   opts <- modifyList(opts, visual_options(opts)); if (is.null(opts$font)) opts$font <- 'sans'
+  opts$font <- diff_plot_font(opts)
+  opts$plot_rank <- rank
   plan <- official_contrast_map(meta, opts$reference_group)
   if (opts$diff_comparisons == 'reference') {
     plan <- plan[plan$negative_group == opts$reference_group, , drop = FALSE]
@@ -395,8 +516,10 @@ plot_ancom_level <- function(fit, counts, meta, folder, opts, title) {
 
 plot_qiime <- function(opts, run, source_run = run) {
   opts <- modifyList(opts, visual_options(opts)); if (is.null(opts$font)) opts$font <- 'sans'
+  opts$font <- diff_plot_font(opts)
   summaries <- list()
   for (entry in opts$tables) {
+    opts$plot_rank <- entry$name
     folder <- file.path(run, '02_differential', paste0('L', entry$level, '_', entry$name))
     dir.create(folder, recursive = TRUE, showWarnings = FALSE)
     original <- file.path(source_run, '02_differential', paste0('L', entry$level, '_', entry$name), 'ancom_results.tsv')
@@ -413,7 +536,8 @@ plot_qiime <- function(opts, run, source_run = run) {
       ggplot2::geom_col() + ggplot2::labs(x = 'Official QIIME 2 ANCOM W', y = NULL,
                                         fill = 'Reject null', title = paste('QIIME 2 ANCOM:', entry$name)) +
       ggplot2::theme_bw(base_family = opts$font) + ggplot2::theme(axis.text.y = ggplot2::element_text(size = 8))
-    files <- save_differential_figure(fig, file.path(folder, 'ancom_W'), height = max(4, nrow(dat) * .25))
+    files <- save_differential_figure(fig, file.path(folder, 'ancom_W'), height = max(4, nrow(dat) * .25),
+                                      opts = opts, profile = 'effect', rank = entry$name, comparison = 'omnibus ANCOM')
     counts <- read_count_input(entry$counts_tsv)
     meta <- read_group_metadata(opts$metadata_tsv, colnames(counts), opts$reference_group, unlist(opts$groups))
     if (anyDuplicated(result$taxon) || !all(result$taxon %in% rownames(counts))) stop('Official QIIME ANCOM taxon IDs do not match original counts')
@@ -425,7 +549,8 @@ plot_qiime <- function(opts, run, source_run = run) {
     jsonlite::write_json(abundance, file.path(folder, 'abundance', 'plot_summary.json'), pretty = TRUE, auto_unbox = TRUE)
     summaries[[length(summaries) + 1L]] <- list(level = entry$level, name = entry$name, status = 'rendered',
                                                comparisons = 'omnibus_ANCOM_only', abundance = abundance,
-                                               plots = c(files, abundance$plots), statistics_refit = FALSE)
+                                               plots = c(files, abundance$plots), statistics_refit = FALSE,
+                                               plot_settings = attr(files, 'plot_settings'))
   }
   summary <- list(method = 'QIIME 2 ANCOM', status = 'rendered', levels = summaries,
                    statistics_refit = FALSE, original_analysis = normalizePath(source_run, mustWork = TRUE))
@@ -442,6 +567,8 @@ replot_saved_differential <- function(request, run) {
   opts <- modifyList(saved, visual_options(request))
   if (!is.null(request$group_style)) opts$group_style <- request$group_style
   if (!is.null(request$font)) opts$font <- request$font
+  if (!is.null(request$plot_settings)) opts$plot_settings <- modifyList(
+    if (is.null(saved$plot_settings)) list() else saved$plot_settings, request$plot_settings, keep.null = TRUE)
   if (identical(saved$method, 'qiime_ancom')) return(plot_qiime(opts, run, source))
   if (!is.null(saved$method) && !identical(saved$method, 'ancombc2')) stop('Unsupported saved differential method')
   summaries <- list()
@@ -456,7 +583,7 @@ replot_saved_differential <- function(request, run) {
       meta <- read_group_metadata(opts$metadata_tsv, colnames(counts), opts$reference_group, unlist(opts$groups))
       for (key in c('res', 'res_global', 'res_pair', 'zero_ind', 'ss_tab'))
         write_result(fit[[key]], file.path(folder, paste0(key, '.tsv')))
-      report <- plot_ancom_level(fit, counts, meta, folder, opts, paste('ANCOM-BC2:', entry$name))
+      report <- plot_ancom_level(fit, counts, meta, folder, opts, paste('ANCOM-BC2:', entry$name), rank = entry$name)
       report$level <- entry$level; report$name <- entry$name; report$original_fit <- fitfile
       report
     }, error = function(e) list(level = entry$level, name = entry$name, status = 'failed', error = conditionMessage(e), statistics_refit = FALSE))
@@ -531,7 +658,7 @@ main <- function() {
                           'Not in model results; inspect prevalence, structural zero table and warnings')
     write_result(status, file.path(folder, 'taxon_status.tsv'))
     plot_error <- NULL
-    visual <- tryCatch(plot_ancom_level(fit, counts, meta, folder, opts, paste('ANCOM-BC2:', entry$name)),
+    visual <- tryCatch(plot_ancom_level(fit, counts, meta, folder, opts, paste('ANCOM-BC2:', entry$name), rank = entry$name),
                        error = function(e) { plot_error <<- conditionMessage(e); NULL })
     if (!is.null(plot_error)) message('L', entry$level, ' model results preserved; plotting failed: ', plot_error)
     diagnostics <- list(level = entry$level, method = 'ANCOM-BC2', status = if (is.null(plot_error)) 'executed' else 'plot_failed', started_at = started,
