@@ -127,6 +127,40 @@ class WindowsDeploymentTests(unittest.TestCase):
         assert b'Station.ps1' in (root/'停止工作站.bat').read_bytes()
         assert not (root.parent/'WRONG').exists()
 
+    def test_optional_advanced_installer_targets_only_its_independent_environment(self):
+        source, root = self.station
+        config = install(source, root)
+        before = (root/'配置/workstation.json').read_bytes()
+        for exists in (False, True):
+            envs = ['/existing/envs/'+name for name in config['envs'].values()]
+            if exists:
+                envs.append('/existing/envs/16s-workstation-advanced')
+            def external(args, **kwargs):
+                if args[1:4] == ['env', 'list', '--json']:
+                    return subprocess.CompletedProcess(args, 0, json.dumps({'envs': envs}), '')
+                return subprocess.CompletedProcess(args, 0)
+            with self.subTest(exists=exists), patch.object(deploy.subprocess, 'run', side_effect=external) as command:
+                result = deploy.install_advanced(root)
+            assert result == {'environment': '16s-workstation-advanced', 'available': True}
+            calls = [call.args[0] for call in command.call_args_list]
+            assert len(calls) == 3
+            assert calls[1][1] == ('install' if exists else 'create')
+            assert calls[1][calls[1].index('-n')+1] == '16s-workstation-advanced'
+            assert '--override-channels' in calls[1] and '--strict-channel-priority' in calls[1]
+            assert 'r-vegan>=2.6,<3' in calls[1] and 'r-ppcor' in calls[1]
+            assert calls[2][calls[2].index('-n')+1] == '16s-workstation-advanced'
+            assert not any(name in calls[1] for name in config['envs'].values())
+        assert (root/'配置/workstation.json').read_bytes() == before
+
+    def test_optional_advanced_installer_refuses_busy_service_before_any_command(self):
+        source, root = self.station
+        install(source, root)
+        with patch.object(deploy, 'ensure_idle', side_effect=ValueError('任务仍在运行')), \
+                patch.object(deploy.subprocess, 'run') as command:
+            with self.assertRaisesRegex(ValueError, '仍在运行'):
+                deploy.install_advanced(root)
+        command.assert_not_called()
+
 
     def test_updates_preserve_raw_results_and_changed_releases(self):
         station = self.station

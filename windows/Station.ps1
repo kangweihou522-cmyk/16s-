@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet('Install','Start','Check','Update','Stop','Status')][string]$Action='Start',
+    [ValidateSet('Install','Start','Check','Update','Stop','Status','InstallAdvanced')][string]$Action='Start',
     [Nullable[int]]$Port,
     [string]$Proxy=''
 )

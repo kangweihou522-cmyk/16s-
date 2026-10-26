@@ -66,6 +66,16 @@ def describe_figure(image, api):
                 analysis = record.get('analysis_run') or value.get('input_run') or previous.get('diversity_run') or owner
                 settings = value.get('plot_settings') or settings
                 break
+        elif value.get('source') == 'advanced_analysis':
+            relative = image.relative_to(owner).with_suffix('').as_posix()
+            entries = value.get('figures', [])
+            if isinstance(entries, dict): entries = [entries]
+            matching = [item for item in entries if item.get('stem') == relative]
+            if len(matching) == 1 and matching[0].get('profile') in {'beta', 'heatmap', 'bubble'}:
+                kind, profile, stem, summary = 'advanced', matching[0]['profile'], relative, value
+                analysis = record.get('analysis_run') or value.get('advanced_run') or previous.get('advanced_run') or owner
+                settings = value.get('plot_settings') or settings
+                break
         elif directory.name == '03_figures' and image.stem in ('bar', 'cladogram') and value.get('lefse_run'):
             kind, profile, stem, summary = 'lefse', 'lefse_' + image.stem, '03_figures/' + image.stem, value
             analysis = record.get('analysis_run') or value['lefse_run']
@@ -109,6 +119,13 @@ def describe_figure(image, api):
               **{ext: str(image.with_suffix('.' + ext)) for ext in ('png', 'svg', 'pdf') if image.with_suffix('.' + ext).is_file()}}
     if kind == 'differential':
         result['visual_options'] = plot_options({}, fallback=options)
+    if kind == 'advanced':
+        original = _json(analysis / 'advanced_options.json')
+        visual = plot_options({}, fallback={**original, **summary.get('visual_options', {}),
+                                             'diff_plot_top_n': summary.get('top_n', original.get('top_n', 20))})
+        result['visual_options'] = {key: visual[key] for key in
+            ('diff_plot_top_n', 'heatmap_low', 'heatmap_mid', 'heatmap_high', 'bubble_low', 'bubble_high')}
+        result['title'] = '高级生态分析 · ' + image.stem
     if kind == 'lefse':
         result['lda_threshold'] = summary.get('lda_threshold', 2)
     return result
@@ -157,6 +174,11 @@ def render_figure(job, request, api):
         visual = {key: request[key] for key in figure['visual_options'] if key in request}
         config.update(plot_options(visual, fallback=figure['visual_options']))
         api.render_saved_differential(job, dict(config, differential_run=str(analysis)))
+        output = Path(job['run']) / (figure['stem'] + '.png')
+    elif figure['kind'] == 'advanced':
+        from advanced_analysis import render_saved_advanced
+        visual = {key: request[key] for key in figure['visual_options'] if key in request}
+        render_saved_advanced(job, dict(config, advanced_run=str(analysis), **visual), api)
         output = Path(job['run']) / (figure['stem'] + '.png')
     else:
         from lefse_analysis import render_lefse, _number

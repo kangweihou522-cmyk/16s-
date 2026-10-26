@@ -54,6 +54,61 @@ fit_ancom_model <- function(counts, meta, opts, fit_function = ANCOMBC::ancombc2
     mdfdr_control = opts$mdfdr_control)
 }
 
+ancom_sample_cohort <- function(counts, meta, opts, fit = NULL) {
+  if (!identical(colnames(counts), rownames(meta))) stop('ANCOM-BC2 sample cohort identifiers must align exactly')
+  lib_cut <- if (is.null(opts$lib_cut)) 0 else opts$lib_cut
+  prv_cut <- if (is.null(opts$prv_cut)) .1 else opts$prv_cut
+  # Official .data_core first filters taxa by prevalence, then retains libraries >= lib_cut.
+  # Do not prefilter the model input: structural-zero detection precedes this step upstream.
+  prevalent <- rowMeans(counts != 0) >= prv_cut
+  library <- colSums(counts[prevalent, , drop = FALSE])
+  ids <- colnames(counts)[library >= lib_cut]
+  source <- 'expected_from_official_prevalence_then_library_filter'
+  if (!is.null(fit)) {
+    if (!is.null(fit$feature_table)) {
+      actual <- colnames(fit$feature_table)
+      if (is.null(actual) || anyDuplicated(actual) || !identical(actual, ids))
+        stop('Official model sample identifiers differ from the expected library filter; refusing to substitute a sample population')
+      ids <- actual
+      source <- 'official_fit_feature_table'
+    } else if (lib_cut > 0) {
+      stop('Saved model feature_table is required to verify samples when lib_cut > 0; rerun the original analysis')
+    } else {
+      source <- 'all_input_samples_lib_cut_0_legacy_fit_without_feature_table'
+    }
+  }
+  included <- colnames(counts) %in% ids
+  audit <- data.frame(SampleID = colnames(counts), Group = as.character(meta$Group),
+                      input_library_size = colSums(counts), library_size_after_prevalence = library,
+                      retained_by_library_filter = included,
+                      reason = ifelse(included, 'retained', 'below_lib_cut_after_prevalence'), stringsAsFactors = FALSE)
+  sizes <- table(meta$Group[included])
+  list(counts = counts[, ids, drop = FALSE], meta = meta[ids, , drop = FALSE], audit = audit,
+       summary = list(status = if (is.null(fit)) 'planned_before_model' else 'verified_for_saved_model',
+                      source = source, lib_cut = lib_cut, prv_cut = prv_cut,
+                      library_filter = 'sum counts over taxa with prevalence >= prv_cut; retain samples with library >= lib_cut',
+                      input_sample_count = ncol(counts), retained_sample_count = length(ids),
+                      retained_sample_ids = as.list(ids),
+                      model_sample_count = if (is.null(fit)) NULL else length(ids),
+                      model_sample_ids = if (is.null(fit)) NULL else as.list(ids),
+                      excluded_sample_ids = as.list(colnames(counts)[!included]),
+                      group_sizes = as.list(setNames(as.integer(sizes), names(sizes))),
+                      source_url = 'https://github.com/FrederickHuangLin/ANCOMBC/blob/RELEASE_3_20/R/ancombc_prep.R#L1-L42'))
+}
+
+validate_ancom_sample_cohort <- function(cohort) {
+  sizes <- unlist(cohort$summary$group_sizes)
+  if (length(sizes) < 2L || any(sizes < 2L))
+    stop('After ANCOM-BC2 library filtering, every original Group must retain at least two samples: ',
+         paste(names(sizes), sizes, sep = '=', collapse = ', '))
+  invisible(TRUE)
+}
+
+write_ancom_sample_cohort <- function(cohort, folder) {
+  write_result(cohort$audit, file.path(folder, 'sample_inclusion.tsv'))
+  jsonlite::write_json(cohort$summary, file.path(folder, 'sample_cohort.json'), pretty = TRUE, auto_unbox = TRUE)
+}
+
 effect_group_style <- function(actual, requested = NULL) {
   order <- if (is.null(requested$group_order)) character() else unlist(requested$group_order, use.names = FALSE)
   if (!is.character(order) || anyNA(order) || any(!nzchar(order)) || anyDuplicated(order))
@@ -428,7 +483,8 @@ plot_abundance_views <- function(counts, meta, findings, folder, opts, title) {
                       ifelse(selection$omnibus_reject, 'qiime_ancom_omnibus_reject', 'not_selected'))))
   write_result(selection, file.path(folder, 'taxon_selection.tsv'))
   write_result(findings, file.path(folder, 'selection_findings.tsv'))
-  note <- 'Each saved input sample is normalized by its own full unrarefied collapsed-count total; group abundance is the arithmetic mean of sample proportions. Abundance is descriptive and is not the bias-corrected model LFC.'
+  population <- if (isTRUE(opts$ancom_model_samples)) 'Each retained ANCOM-BC2 model sample' else 'Each saved input sample'
+  note <- paste0(population, ' is normalized by its own full unrarefied collapsed-count total; group abundance is the arithmetic mean of sample proportions. Abundance is descriptive and is not the bias-corrected model LFC.')
   zero_note <- if (any(selection$structural_zero)) '[SZ] marks an official structural-zero presence/absence finding in at least one requested pair. Its LFC/SE/p/q are not estimated; known TRUE vs FALSE is required, not TRUE vs TRUE or missing flags.' else ''
   if (!nrow(selected)) {
     empty <- data.frame(taxon = character(), Group = character(), mean_relative_abundance = numeric(), mean_percent = numeric(), row_zscore = numeric())
@@ -539,6 +595,11 @@ plot_ancom_level <- function(fit, counts, meta, folder, opts, title, rank = '') 
   opts <- modifyList(opts, visual_options(opts)); if (is.null(opts$font)) opts$font <- 'sans'
   opts$font <- diff_plot_font(opts)
   opts$plot_rank <- rank
+  cohort <- ancom_sample_cohort(counts, meta, opts, fit)
+  write_ancom_sample_cohort(cohort, folder)
+  validate_ancom_sample_cohort(cohort)
+  counts <- cohort$counts; meta <- cohort$meta
+  opts$ancom_model_samples <- TRUE
   plan <- official_contrast_map(meta, opts$reference_group)
   if (opts$diff_comparisons == 'reference') {
     plan <- plan[plan$negative_group == opts$reference_group, , drop = FALSE]
@@ -583,7 +644,7 @@ plot_ancom_level <- function(fit, counts, meta, folder, opts, title, rank = '') 
        two_group_note = if (nlevels(meta$Group) == 2L) 'The official package disables multi-group pairwise for two groups; the primary result is the single actual comparison' else NULL,
        comparisons = comparisons, abundance = abundance,
        plots = c(unlist(lapply(comparisons, `[[`, 'files'), use.names = FALSE), abundance$plots),
-       statistics_refit = FALSE, q_recomputed = FALSE)
+       sample_cohort = cohort$summary, statistics_refit = FALSE, q_recomputed = FALSE)
 }
 
 plot_qiime <- function(opts, run, source_run = run) {
@@ -714,13 +775,22 @@ main <- function() {
     started <- format(Sys.time(), tz = 'UTC', usetz = TRUE)
     set.seed(opts$seed)
     model_error <- NULL
-    fit <- tryCatch(withCallingHandlers(fit_ancom_model(counts, meta, opts),
+    cohort <- ancom_sample_cohort(counts, meta, opts)
+    write_ancom_sample_cohort(cohort, folder)
+    fit <- tryCatch(withCallingHandlers({
+      validate_ancom_sample_cohort(cohort)
+      fitted <- fit_ancom_model(counts, meta, opts)
+      cohort <- ancom_sample_cohort(counts, meta, opts, fitted)
+      write_ancom_sample_cohort(cohort, folder)
+      validate_ancom_sample_cohort(cohort)
+      fitted
+    },
       warning = function(w) { warnings <<- c(warnings, conditionMessage(w)) }),
       error = function(e) { model_error <<- conditionMessage(e); NULL })
     if (!is.null(model_error)) {
       message('L', entry$level, ' (', entry$name, ') ANCOM-BC2 failed: ', model_error)
       failure <- list(level = entry$level, method = 'ANCOM-BC2', status = 'failed',
-                       error = model_error, warnings = unique(warnings),
+                       error = model_error, warnings = unique(warnings), sample_cohort = cohort$summary,
                        note = 'No p/q or effect estimates created for a failed model')
       jsonlite::write_json(failure, file.path(folder, 'diagnostics.json'), pretty = TRUE, auto_unbox = TRUE)
       write_result(data.frame(taxon = rownames(counts), status = 'model_failed',
@@ -751,6 +821,7 @@ main <- function() {
                          global = opts$global, pairwise = opts$pairwise,
                          pairwise_adjustment = 'Official ANCOM-BC2 mixed directional FDR with global screen and Holm within-taxon control',
                          structural_zeros = 'Reported separately by official zero_ind; no artificial finite p/q values',
+                         sample_cohort = cohort$summary,
                          feature_count = nrow(counts), modeled_features = length(fit_taxa),
                          visualizations = visual, plot_error = plot_error,
                          plots = if (is.null(visual)) character() else visual$plots)

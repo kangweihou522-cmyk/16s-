@@ -2,6 +2,20 @@
 
 浏览器操作，WSL Ubuntu 中使用你自己安装的 **QIIME 2 和 R** 计算。原始测序数据只读，每次生成独立结果目录；分类器由用户选择本地 `.qza` 文件。程序不调用任何 AI API，不需保持 ChatGPT/Codex 会话运行。
 
+新增[完整新手指南（19章）](docs/USER_GUIDE.md)与[方法/QC审查](docs/METHODS_AUDIT.md)。工作站页面最后可全文搜索指南、下载[Word版](docs/USER_GUIDE.docx)；文稿、离线网页和Word同源生成，无需安装文档插件。说明区分官方定义、当前实现与经验阈值，包含适用限制和原始参考资料。
+
+## 高级生态分析与本次质控完善
+
+高级分析复用已完成批次的未抽平 L2–L6 计数，支持核心菌群/检出率、CLR-PCA、Bray–Curtis PERMANOVA与PERMDISP、Hellinger-RDA或Bray-dbRDA、表型Spearman/控制分组的偏Spearman。元数据按SampleID匹配，保存完整分母、变换、模型样本、P/q、诊断和R缓存；重复主体、共线性或自由度不足时不输出虚构检验。关联默认CLR，不能解释为绝对菌量或因果。各模块完成/跳过状态显示在页面；PNG/SVG/PDF可逐图调整，预览只读缓存。
+
+首次使用新高级模块，已按方案A部署的用户双击安装目录中的 **安装高级分析环境.bat**，准备可选独立环境`16s-workstation-advanced`；启动和普通更新不自动安装它，原QIIME/绘图R等环境保留。网页可编辑环境名。仍从Git目录运行的WSL用户可只创建这个新环境：
+
+```bash
+conda create -y -n 16s-workstation-advanced --override-channels -c conda-forge --strict-channel-priority r-base=4.4 'r-vegan>=2.6,<3' r-permute r-ppcor r-ggplot2 r-jsonlite r-svglite r-systemfonts r-mass
+```
+
+本次还新增DADA2逐样本阶段保留率、明确记录曲线深度上限调整；修复自动文件复用、无效统计量/常数配对处理、PCoA轴比例及ANCOM-BC2拟合样本与丰度图不一致的问题。数据完整性保护不改变原始文件；排查阈值不自动删除样本。完整限制见方法审查。
+
 ## 获取、启动和更新
 
 Windows 推荐使用新的[自选目录部署（方案 A）](docs/WINDOWS_DEPLOYMENT.md)：下载完整源码 ZIP 并解压，双击 **部署工作站.bat** 选择 D/E 盘安装位置。部署完成后使用桌面快捷方式或安装目录内的启动、更新、检查环境和停止入口；现有 WSL/Conda 环境保留。默认端口8766，启动不联网、更新由Windows下载，运行任务时拒绝更新。旧命令行入口仍可使用，下面为原 Git 工作目录的用法。

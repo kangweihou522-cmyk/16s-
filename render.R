@@ -290,6 +290,19 @@ plots <- list(); beta_stats <- list(); beta_ids <- NULL
 combined_target <- is.null(plot_target) || identical(plot_target$stem,'beta/PCoA_four_metrics')
 beta_metrics <- if (!want_profile('beta')) character() else if (combined_target) names(titles) else sub('^beta/PCoA_','',plot_target$stem)
 for (metric in beta_metrics) {
+  # A zero distance matrix has no variance and therefore no defined PCoA
+  # explained proportions. Preserve the other metrics and show the reason.
+  dm <- read_dm(result_path(run,'exports','distance',metric,'distance-matrix.tsv'),md$SampleID)
+  if (all(dm==0)) {
+    reason <- 'PCoA undefined: all pairwise distances are zero.'
+    note(paste(metric,reason))
+    p <- ggplot2::ggplot()+ggplot2::annotate('text',x=0,y=0,label=reason,size=4,family=font)+
+      ggplot2::theme_void(base_family=font)+ggplot2::labs(title=paste0('PCoA (',titles[[metric]],')'))
+    p <- apply_plot_settings(p,'beta',metric=titles[[metric]])
+    plots[[metric]] <- p; save_plot(p,paste0('beta/PCoA_',metric),6,5,'beta')
+    csv(data.frame(Status='undefined_zero_distances',Reason=reason),file.path(out,'beta',paste0(metric,'_PCoA_status.csv')))
+    next
+  }
   f <- result_path(run,'exports','pcoa',metric,'ordination.txt')
   if (!file.exists(f)) { note(paste('PCoA export missing:',metric)); next }
   ord <- read_ord(f); d <- match_md(ord$ids)
@@ -315,7 +328,7 @@ for (metric in beta_metrics) {
     p <- ggplot2::ggplot(pts,ggplot2::aes(PC1,PC2,color=Group))+point_layer+
     ggplot2::geom_hline(yintercept=0,linetype='dashed',color='grey40')+ggplot2::geom_vline(xintercept=0,linetype='dashed',color='grey40')+
     ggplot2::scale_color_manual(values=colors)+theme_base()+ggplot2::labs(title=paste0('PCoA (',titles[[metric]],')'),
-      x=sprintf('PCoA1 (%.1f%%)',ord$proportion[1]*100),y=sprintf('PCoA2 (%.1f%%)',ord$proportion[2]*100))
+      x=sprintf('PCoA1 (%.1f%%)',ord$proportion[1]*100),y=sprintf('PCoA2 (%.1f%%)',ord$proportion[2]*100))+ggplot2::coord_equal()
     if (beta_options$show_sample_labels) p <- p + ggplot2::geom_text(ggplot2::aes(label=SampleID),vjust=-.8,size=3,family=font,show.legend=FALSE)
   }
   p <- apply_plot_settings(p,'beta',metric=titles[[metric]])

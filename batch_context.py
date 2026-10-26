@@ -36,7 +36,7 @@ def restore_batch(selected, api):
         run=api.approved_run(p['preprocess']); p=_parameters(run)
     config=dict(p.get('config',p))
     if not config.get('samples'): raise ValueError('请选择质量检查或预处理批次目录，而非单个图片/检查目录')
-    fields={key:'' for key in ('quality_run','run','diversity_run','differential_run','lefse_run','abundance_run','result_run','figure_run')}
+    fields={key:'' for key in ('quality_run','run','diversity_run','differential_run','lefse_run','abundance_run','advanced_run','result_run','figure_run')}
     fields['result_run']=str(run); fields['figure_run']=str(run)
     if (run/'quality_complete.json').is_file() and not (run/'preprocess_started.json').exists(): fields['quality_run']=str(run)
     if (run/'preprocess_complete.json').is_file(): fields['run']=str(run)
@@ -52,6 +52,7 @@ def restore_batch(selected, api):
                 elif (child/'lefse_complete.json').is_file(): fields['lefse_run']=str(child)
                 elif (child/'differential_options.json').is_file() and (child/'differential_complete.json').is_file(): fields['differential_run']=str(child)
                 elif (child/'10_abundance/manifest.json').is_file() and (child/'abundance_complete.json').is_file(): fields['abundance_run']=str(child)
+                elif (child/'advanced_complete.json').is_file(): fields['advanced_run']=str(child)
             except (OSError,ValueError,TypeError): continue
     config.setdefault('data_state','clean' if config.get('primer_mode')=='removed' else 'raw')
     config.setdefault('input_layout','unmerged')

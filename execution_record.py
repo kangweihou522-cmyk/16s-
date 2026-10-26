@@ -39,6 +39,7 @@ def prepare_execution(job, root, action, config, runtime):
         ('run_layout.py', '结果路径、计数汇总和每一步处理说明。'),
         ('quality_advice.py', '读取逐位置质量统计，生成 DADA2 参数建议。'),
         ('sequence_structure.py', '完整候选引物、方向与前方附加序列检测，clean FASTQ及残留报告。'),
+        ('qc_report.py', '由已有DADA2统计计算逐样本相邻阶段和总体保留率，不重扫FASTQ。'),
         ('batch_context.py', '按已保存的批次来源只读恢复历史阶段结果，防止不同任务目录混用。'),
         ('deployment_context.py', '读取已部署的目录与环境默认值；不修改既有分析输入和结果。'),
         ('depth_advice.py', '依据过滤后样本计数推荐抽平深度，另附曲线诊断。'),
@@ -50,6 +51,7 @@ def prepare_execution(job, root, action, config, runtime):
         ('differential_analysis.py', '门到属的 ANCOM-BC2 / QIIME ANCOM 差异分析编排。'),
         ('lefse_analysis.py', 'LEfSe 分类谱系预处理、检验和基于缓存的 LDA 阈值重绘。'),
         ('functional_prediction.py', 'PICRUSt2、NSTI 与用户 KO 数据库注释和层级汇总。'),
+        ('advanced_analysis.py', '核心菌群、排序与表型关联的样本对齐、参数校验及缓存重绘编排。'),
         ('execution_record.py', '记录实际执行命令、参数及源码文本。'),
     ]:
         capture_source(job, Path(root) / name, 'JSON' if name.endswith('.json') else 'Python', explanation)

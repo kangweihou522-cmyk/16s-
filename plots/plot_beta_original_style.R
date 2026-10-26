@@ -47,6 +47,7 @@ original_pcoa_plot <- function(points, proportion, p_value = NULL,
                         linewidth = 0.5) +
     ggplot2::scale_color_manual(values = group_colors) +
     ggplot2::scale_fill_manual(values = group_colors) +
+    ggplot2::coord_equal() +
     ggplot2::labs(
       title = paste0("PCoA (", title, ")"),
       x = paste0("PCoA1 (", round(proportion[1] * 100, 1), "%)"),

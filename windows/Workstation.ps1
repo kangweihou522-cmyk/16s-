@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Install','Start','Check','Update','Stop','Status')][string]$Action='Start',
+    [ValidateSet('Install','Start','Check','Update','Stop','Status','InstallAdvanced')][string]$Action='Start',
     [string]$InstallRoot='',
     [string]$Distro='',
     [ValidateRange(1024,65535)][int]$Port=8766,
@@ -213,6 +213,11 @@ function Show-EnvironmentCheck {
     foreach ($entry in $report.envs.PSObject.Properties) {
         $status='可用'; if (!$entry.Value.available) { $status='未安装（使用相应分析功能前需准备）' }
         Write-Host ('  '+$entry.Value.name+'：'+$status)
+    }
+    if ($report.optional_envs.advanced) {
+        $advanced=$report.optional_envs.advanced
+        if ($advanced.available) { Write-Host ('  '+$advanced.name+'：高级分析可用') }
+        else { Write-Host ('  '+$advanced.name+'：可选，首次需要时双击安装高级分析环境.bat') }
     }
     foreach ($warning in $report.warnings) { Write-Warning $warning }
 }
@@ -471,6 +476,12 @@ function Invoke-Workstation {
             $source=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
             if ($Action -eq 'Update') { $source=Get-UpdateSource $root }
             Install-Station $source $root $selected $selectedPort $wslUser $existing
+        } elseif ($Action -eq 'InstallAdvanced') {
+            Assert-UpdateAllowed $existing
+            $before=Get-ServiceState $existing
+            if ($before.state -eq 'running') { $null=Get-ServiceState $existing 'stop' }
+            try { Invoke-Deploy $existing 'install-advanced' }
+            finally { if ($before.state -eq 'running') { Start-Station $existing } }
         } elseif ($Action -eq 'Check') {
             Show-EnvironmentCheck $existing
             $state=Get-ServiceState $existing

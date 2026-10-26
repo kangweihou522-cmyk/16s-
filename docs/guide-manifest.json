@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "source": "docs/USER_GUIDE.md",
+  "source_sha256": "54f3d85b5ac138f3699bbe9d0b80742882dc73d6bc1f2f0385783517f4d6d46b",
+  "runtime": {
+    "app.py": "36db4912f9cfb3ecf51fa946e4bd9d9e26572d3892102b2e99f87756229fa498",
+    "index.html": "cd5f56e00ba5514bc7260a910e1f3fd825101df5dbc15e30206b2260026a973d",
+    "sequence_structure.py": "b7d32db8983e3add71bdab7fb3d1072c26c4b37724e5b2da2fa267397f5798a2",
+    "quality_advice.py": "6808270b8b90b2c5e11c221c27e164eb51cdfa48f54c16b324a950e8210c5457",
+    "qc_report.py": "16040303b94e6fa93479be034492c741d00a86007cf4d588d733233e52c66706",
+    "depth_advice.py": "402ca0bd49572458f72e7d4eea7a6c5d45e4f4ecc228e9114651d6bd91b8bd5a",
+    "abundance_tables.py": "ab1ddfbbec6601deafd8b4b2b3f49225194965358c58aa1218effd548e60e6ef",
+    "differential_analysis.py": "dbccf8a9af6f602ad4a1c829e62de541a566d60432bb77bb8ad3807e9e3458ae",
+    "differential_ancombc.R": "bc72886f776462207ce3599c428d14d0c099d5d6577246b28f1e366876282d9e",
+    "lefse_analysis.py": "f4be3557a3109a4ba67e9ba8646aae4c7148d7f2d60d41a8ad8d51d930256286",
+    "functional_prediction.py": "8af31c4d61ad07dbd037f78900c9e44cdd042890cda9ed41150b2ef01fc8a9ac",
+    "advanced_analysis.py": "f95d839b772b0ae48fe281d483a707fdbd70f110fd5aebb8783aba99b55e3873",
+    "advanced_analysis.R": "f3f95390ab2ec716e2ed48dde0dde88ac3825f1ccfa03de4acd414b6a4a71b84",
+    "render.R": "8a68f85920ee4ed08b9b01289df07606a6fa48202af953a50fa313c15f2404af",
+    "plots/qiime2_io.R": "0fbc5852ee8504ba188c6c40181ebaac11f6a6c7430d7dce8664373067774bce",
+    "plot_settings.py": "9dee103fa58ba67ee7f5c93bc3fe4f0da06bad854d15938b7f4c052f0fa9c799",
+    "figure_editor.py": "5e89cc2fd7517a474acce5023fcfbea963f9f5c343486e838c459e75fe27b4a6"
+  },
+  "outputs": {
+    "static/guide/index.html": "238e23e14a41ae67ab03d7edb0a131fca38dc4e504ff8bbd405705a6d29d47f0",
+    "docs/USER_GUIDE.docx": "45c15deae0ce1b23eceb357348a8162f8e23d831e065b98a560329f6350a3c34"
+  }
+}

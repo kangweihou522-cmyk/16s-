@@ -30,17 +30,19 @@ DEFAULT_ENVS = dict(qiime='qiime2-amplicon-2025.7', r='16s-workstation-r',
 SOURCE_DIRS = {'plots', 'windows', 'assets', 'static', 'fonts', 'vendor', 'docs'}
 SOURCE_FILES = {'README.md', 'VALIDATION.md', 'SHA256SUMS.txt', '启动.sh', '安装依赖.sh',
                 '分组模板.csv', '分组模板_两列.csv', '部署工作站.bat', '启动工作站.bat',
-                '检查环境.bat', '更新工作站.bat', '停止工作站.bat'}
+                '检查环境.bat', '更新工作站.bat', '停止工作站.bat', '安装高级分析环境.bat'}
 IGNORE = {'.git', '.venv', 'runs', 'updates', '__pycache__', '.cache', '.pytest_cache',
           '原始数据', '参考文件', '分析结果', '日志', '配置', '程序', 'node_modules'}
 REQUIRED = ['app.py', 'index.html', 'launch.py', 'run_layout.py', 'batch_context.py', 'deployment_context.py',
+            'advanced_analysis.py', 'advanced_analysis.R', 'qc_report.py',
             'abundance_tables.py', 'depth_advice.py', 'differential_analysis.py',
             'execution_record.py', 'figure_editor.py', 'functional_prediction.py',
             'group_style.py', 'lefse_analysis.py', 'plot_settings.py', 'quality_advice.py',
             'sequence_structure.py', 'render.R', 'taxonomy_plot.R', 'differential_ancombc.R',
             'taxonomy_palettes.json', 'plots/qiime2_io.R', 'plots/plot_alpha_original_style.R',
             'plots/plot_beta_original_style.R', 'windows/deploy.py', 'windows/station_runtime.py',
-            'windows/Workstation.ps1', 'windows/Station.ps1']
+            'windows/Workstation.ps1', 'windows/Station.ps1', 'docs/USER_GUIDE.md',
+            'docs/USER_GUIDE.docx', 'static/guide/index.html', 'docs/guide-manifest.json']
 
 
 def digest(data):
@@ -342,7 +344,7 @@ def launchers(config):
     helpers = {'Station.ps1': (Path(config['program_wsl'])/'windows/Station.ps1').read_bytes()}
     for name, action in [('启动工作站.bat', 'Start'), ('检查环境.bat', 'Check'),
                          ('更新工作站.bat', 'Update'), ('停止工作站.bat', 'Stop'),
-                         ('部署工作站.bat', 'Install')]:
+                         ('部署工作站.bat', 'Install'), ('安装高级分析环境.bat', 'InstallAdvanced')]:
         pause = 'pause\r\n' if action == 'Check' else 'if not "%STATION_EXIT%"=="0" pause\r\n'
         helpers[name] = ('@echo off\r\nsetlocal\r\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass '
                          '-File "%~dp0Station.ps1" -Action '+action+' %*\r\n'
@@ -419,7 +421,7 @@ def rollback(root, plan_file):
             raise ValueError('当前版本已改变，不能回滚此部署，未覆盖配置。')
         expected = {}
         managed = active.get('managed_files', {})
-        if set(managed) != {'Station.ps1', '启动工作站.bat', '检查环境.bat', '更新工作站.bat', '停止工作站.bat', '部署工作站.bat'}:
+        if set(managed) != {'Station.ps1', '启动工作站.bat', '检查环境.bat', '更新工作站.bat', '停止工作站.bat', '部署工作站.bat', '安装高级分析环境.bat'}:
             raise ValueError('回滚配置缺少受管启动文件，未覆盖配置。')
         for name, expected_digest in managed.items():
             path = root/name
@@ -489,8 +491,49 @@ def check(root, plan_file=None):
     missing = [value['name'] for value in envs.values() if not value['available']]
     if missing:
         warnings.append('以下环境未找到：'+', '.join(missing)+'。仍可打开网页；对应分析须先使用已有可用环境。')
-    return dict(conda_wsl=conda, conda_available=True, envs=envs,
+    optional = {'advanced': {'name': '16s-workstation-advanced',
+                              'available': '16s-workstation-advanced' in available}}
+    return dict(conda_wsl=conda, conda_available=True, envs=envs, optional_envs=optional,
                 missing_envs=missing, ready=not missing and not warnings, warnings=warnings)
+
+
+def install_advanced(root):
+    """Prepare a separate optional R environment, never mutate QIIME/plot R."""
+    root = _root(root)
+    config = read_config(root)
+    if not config:
+        raise ValueError('请先完成工作站部署')
+    ensure_idle(root, [config])
+    name = '16s-workstation-advanced'
+    if name in config['envs'].values():
+        raise ValueError('高级环境名与现有分析环境冲突，未修改任何环境')
+    conda = find_conda(config.get('conda_wsl'))
+    try:
+        listed = subprocess.run([conda, 'env', 'list', '--json'], capture_output=True,
+                                text=True, timeout=30, check=True)
+        envs = json.loads(listed.stdout)['envs']
+        exists = any(Path(item).name == name for item in envs)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        raise ValueError('无法确认已有 Conda 环境，未安装；请查看 conda env list') from error
+    packages = ['r-base=4.4', 'r-vegan>=2.6,<3', 'r-permute', 'r-ppcor',
+                'r-ggplot2', 'r-jsonlite', 'r-svglite', 'r-systemfonts', 'r-mass']
+    command = [conda, 'install' if exists else 'create', '-y', '-n', name,
+               '--override-channels', '-c', 'conda-forge', '--strict-channel-priority', *packages]
+    print('仅准备独立高级分析环境 '+name+'；已有 QIIME、R绘图、ANCOM、LEfSe、PICRUSt2 环境保留。', flush=True)
+    result = subprocess.run(command)
+    if result.returncode:
+        raise ValueError('高级环境安装失败（退出码 '+str(result.returncode)+'）；现有分析环境未被此命令修改')
+    env = dict(os.environ)
+    for key in ('R_HOME', 'LD_LIBRARY_PATH', 'LD_PRELOAD'):
+        env.pop(key, None)
+    for key in ('R_LIBS', 'R_LIBS_USER', 'R_LIBS_SITE', 'R_PROFILE', 'R_PROFILE_USER', 'R_ENVIRON', 'R_ENVIRON_USER'):
+        env[key] = '/dev/null'
+    check_code = 'stopifnot(all(vapply(c("vegan","permute","ppcor","ggplot2","jsonlite","svglite","systemfonts"),requireNamespace,logical(1),quietly=TRUE)))'
+    checked = subprocess.run([conda, 'run', '--no-capture-output', '-n', name,
+                              'Rscript', '--vanilla', '-e', check_code], env=env)
+    if checked.returncode:
+        raise ValueError('高级环境已准备，但 R 依赖检查未通过，请保留终端错误')
+    return {'environment': name, 'available': True}
 
 
 def start(root):
@@ -556,6 +599,7 @@ if __name__ == '__main__':
     verify = sub.add_parser('check')
     verify.add_argument('root'); verify.add_argument('--plan', dest='plan_file')
     run = sub.add_parser('start'); run.add_argument('root')
+    advanced = sub.add_parser('install-advanced'); advanced.add_argument('root')
     args = parser.parse_args()
     try:
         if args.action == 'prepare':
@@ -568,6 +612,8 @@ if __name__ == '__main__':
             result = complete(args.root, args.plan_file)
         elif args.action == 'check':
             result = check(args.root, args.plan_file)
+        elif args.action == 'install-advanced':
+            result = install_advanced(args.root)
         else:
             sys.exit(start(args.root))
         print(json.dumps(result, ensure_ascii=False))

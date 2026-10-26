@@ -135,6 +135,9 @@ q2_read_qiime_stats <- function(path, method, dm, meta, permutations = NULL) {
                        F = numeric_value("test statistic"),
                        P = numeric_value("p-value"),
                        Permutations = numeric_value("number of permutations"))
+  if (result$F < 0 || result$P < 0 || result$P > 1 || result$Permutations < 1) {
+    stop("Invalid QIIME 2 overall test: ", path)
+  }
   if (result$N != nrow(meta) || result$Groups != nlevels(meta$Group) ||
       (!is.null(permutations) && result$Permutations != permutations)) {
     stop("QZV sample/group/permutation counts disagree with this R analysis: ", path)
@@ -173,21 +176,41 @@ q2_read_qiime_stats <- function(path, method, dm, meta, permutations = NULL) {
     if (!all(need %in% names(p))) stop("Unsupported QIIME 2 pairwise CSV")
     stat_col <- setdiff(names(p), need)
     if (length(stat_col) != 1L) stop("Cannot identify pairwise test statistic")
-    pair <- data.frame(Group1 = p[["Group 1"]], Group2 = p[["Group 2"]],
-                       N = as.numeric(p[["Sample size"]]),
-                       F = as.numeric(p[[stat_col]]),
-                       P = as.numeric(p[["p-value"]]),
-                       Permutations = as.numeric(p[["Permutations"]]),
-                       q_within_metric = as.numeric(p[["q-value"]]))
+    saved_pair <- data.frame(Group1 = p[["Group 1"]], Group2 = p[["Group 2"]],
+                       N = suppressWarnings(as.numeric(p[["Sample size"]])),
+                       F = suppressWarnings(as.numeric(p[[stat_col]])),
+                       P = suppressWarnings(as.numeric(p[["p-value"]])),
+                       Permutations = suppressWarnings(as.numeric(p[["Permutations"]])),
+                       q_within_metric = suppressWarnings(as.numeric(p[["q-value"]])))
     expected <- utils::combn(levels(meta$Group), 2)
-    keys <- q2_pair_key(pair$Group1, pair$Group2)
+    keys <- q2_pair_key(saved_pair$Group1, saved_pair$Group2)
     target <- q2_pair_key(expected[1, ], expected[2, ])
-    if (anyDuplicated(keys) || !setequal(keys, target) ||
-        any(!is.finite(as.matrix(pair[c("N", "F", "P", "Permutations", "q_within_metric")])))) {
-      stop("Invalid or incomplete QIIME 2 pairwise comparisons")
+    pos <- match(target, keys)
+    pair <- saved_pair[pos, , drop = FALSE]
+    pair$Group1 <- expected[1, ]; pair$Group2 <- expected[2, ]
+    pair$F_saved <- pair$F; pair$P_saved <- pair$P
+    pair$q_within_metric_saved <- pair$q_within_metric
+    expected_n <- vapply(seq_len(ncol(expected)), function(j)
+      sum(as.character(meta$Group) %in% expected[, j]), integer(1))
+    duplicate <- keys %in% keys[duplicated(keys)]
+    valid <- !is.na(pos) & !(target %in% keys[duplicate]) &
+      apply(is.finite(as.matrix(pair[c("N", "F", "P", "Permutations")])), 1, all) &
+      pair$N == expected_n & pair$F >= 0 & pair$P >= 0 & pair$P <= 1 &
+      pair$Permutations == result$Permutations
+    valid[is.na(valid)] <- FALSE
+    valid_q <- is.finite(pair$q_within_metric) & pair$q_within_metric >= 0 & pair$q_within_metric <= 1
+    pair$Status <- ifelse(is.na(pos), "not_in_qiime_output",
+                          ifelse(valid, "ok", "invalid_saved_test"))
+    pair[!valid, c("F", "P", "q_within_metric")] <- NA_real_
+    # A NaN statistic can receive a spurious finite permutation P in scikit-bio.
+    # Keep its saved values for audit, but never use it or a BH family containing
+    # it as valid inference. Do not recalculate the official QIIME q values.
+    if (any(!valid) || any(!valid_q) || any(!keys %in% target)) {
+      pair$q_within_metric <- NA_real_
+      pair$Status[valid] <- "valid_P_incomplete_q_family"
+      message("Invalid/incomplete pairwise tests; retaining valid overall and P values: ", path)
     }
-    pair <- pair[match(target, keys), , drop = FALSE]
-    if (any(pair$Permutations != result$Permutations)) stop("Pairwise permutation counts disagree")
+    rownames(pair) <- NULL
   }
   list(overall = result, pairwise = pair)
 }
@@ -245,7 +268,7 @@ q2_read_alpha_stats <- function(path, metric_key, data, group_col = "Group") {
   if (length(objects) != 1L) stop("无法读取 QIIME alpha 全局 KW 结果：", path)
   global <- jsonlite::fromJSON(objects)
   if (length(global$H) != 1L || length(global$p) != 1L ||
-      !is.finite(global$H) || !is.finite(global$p)) {
+      !is.finite(global$H) || !is.finite(global$p) || global$H < 0 || global$p < 0 || global$p > 1) {
     stop("QIIME alpha KW 结果无效：", path)
   }
   # metadata.tsv contains the sample-level alpha values used in this QZV.
@@ -294,6 +317,18 @@ q2_read_alpha_stats <- function(path, metric_key, data, group_col = "Group") {
                         H = pair$H[pos], P = pair$P[pos],
                         q_within_metric = pair$q_within_metric[pos])
   result$Status <- ifelse(is.na(pos), "not_in_qiime_output", "ok")
+  valid <- is.finite(result$H) & result$H >= 0 &
+    is.finite(result$P) & result$P >= 0 & result$P <= 1
+  valid_q <- is.finite(result$q_within_metric) & result$q_within_metric >= 0 & result$q_within_metric <= 1
+  result$H_saved <- result$H; result$P_saved <- result$P
+  result$q_within_metric_saved <- result$q_within_metric
+  invalid <- !is.na(pos) & !valid
+  if (any(invalid | (!is.na(pos) & !valid_q))) {
+    result[invalid, c("H", "P", "q_within_metric")] <- NA_real_
+    result$q_within_metric <- NA_real_
+    result$Status[invalid] <- "invalid_saved_test"
+    result$Status[valid] <- "valid_P_incomplete_q_family"
+  }
   list(overall = data.frame(KW_H = global$H, KW_p = global$p, N = nrow(data)),
        pairwise = result)
 }

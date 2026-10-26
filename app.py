@@ -140,6 +140,7 @@ def discover(c):
                 files[direction]=file
             found[sid]=files
     else:
+        used={}
         for p in sorted(folder.iterdir()):
             if not re.search(r'\.(fastq|fq)(\.gz)?$',p.name,re.I) or not p.is_file(): continue
             stem = re.sub(r'\.(fastq|fq)(\.gz)?$','',p.name,flags=re.I)
@@ -157,6 +158,11 @@ def discover(c):
                 if len(candidates)>1: raise ValueError(f'文件名对应多个 SampleID: {p.name}')
                 sid,direction=(candidates[0] if candidates else stem),'1'
             if direction in found.setdefault(sid,{}): raise ValueError(f'{sid} 有多个同方向文件；多 lane 请先经确认合并')
+            real=p.resolve()
+            if not real.is_relative_to(folder): raise ValueError(f'{sid} 的 R{direction} 文件必须位于选择的原始目录内')
+            st=real.stat(); identity=(st.st_dev,st.st_ino) if st.st_ino else str(real)
+            if identity in used: raise ValueError(f'文件重复引用：{sid}.R{direction} 与 {used[identity]} 使用同一 FASTQ')
+            used[identity]=f'{sid}.R{direction}'
             found[sid][direction]=p
         expected = {r[0] for r in rows}
         if set(found)!=expected: raise ValueError(f'样本不匹配：缺文件 {sorted(expected-set(found))}；缺分组 {sorted(set(found)-expected)}')
@@ -555,7 +561,10 @@ def preprocess(job,c,quality_only=False):
     export_artifact(job,c,'dada2-table.qza','exported-dada2-table')
     command(job,conda_cmd(c)+['biom','convert','-i',str(artifact_path(run,'exported-dada2-table/feature-table.biom')),'-o',str(artifact_path(run,'exported-dada2-table/feature-table.tsv')),'--to-tsv'],run)
     dada_summary=denoising_counts(artifact_path(run,'exports/denoising-stats'))
-    finish_stage(job,{'denoising':dada_summary,'asv_table':table_summary(artifact_path(run,'exported-dada2-table/feature-table.tsv'))},['input 是输入数量，filtered 是质量过滤后数量，denoised 是降噪后数量，merged 是拼接后数量，non-chimeric 是去嵌合体后数量；双端按读对/合并序列计数。','按预期错误数过滤并学习错误模型；不采用逐 read 的 Q20/10bp 滑窗质控。','双端在降噪后拼接，至少 12bp 重叠且允许 0 个错配。','consensus 在各样本检测嵌合体并汇总去除；不额外使用 USEARCH/gold。','扩增子长度未知时没有预先验证重叠，请核对每个样本 merged 和 non-chimeric 保留率。','官方依据：https://github.com/qiime2/q2-dada2/blob/2025.7.0/q2_dada2/_denoise.py'])
+    from qc_report import write_dada2_retention
+    retention_report=write_dada2_retention(run/'03_dada2',dada_summary,paired=paired)
+    job.setdefault('result',{})['dada2_retention']=retention_report
+    finish_stage(job,{'denoising':dada_summary,'retention_report':retention_report,'asv_table':table_summary(artifact_path(run,'exported-dada2-table/feature-table.tsv'))},['input 是输入数量，filtered 是质量过滤后数量，denoised 是降噪后数量，merged 是拼接后数量，non-chimeric 是去嵌合体后数量；双端按读对/合并序列计数。','逐样本保留率见 dada2_retention.csv/json；低保留提示仅供排查，不自动删样，阈值不是官方合格线。','按预期错误数过滤并学习错误模型；不采用逐 read 的 Q20/10bp 滑窗质控。','双端在降噪后拼接，至少 12bp 重叠且允许 0 个错配。','consensus 在各样本检测嵌合体并汇总去除；不额外使用 USEARCH/gold。','扩增子长度未知时没有预先验证重叠，请核对每个样本 merged 和 non-chimeric 保留率。','官方依据：https://github.com/qiime2/q2-dada2/blob/2025.7.0/q2_dada2/_denoise.py'])
     begin_stage(job,'04_taxonomy_filter','物种分类与特征过滤',{'classifier':str(classifier),'min_frequency':c['min_frequency'],'exclude':['Archaea','mitochondria','chloroplast']})
     q(job,c,'feature-classifier','classify-sklearn','--i-classifier',classifier,'--i-reads','dada2-rep-seqs.qza','--p-n-jobs','1','--o-classification','taxonomy.qza')
     q(job,c,'metadata','tabulate','--m-input-file','taxonomy.qza','--o-visualization','taxonomy.qzv')
@@ -573,19 +582,27 @@ def preprocess(job,c,quality_only=False):
     export_artifact(job,c,'rooted-tree.qza','exports/phylogeny')
     finish_stage(job,{'input_asv_count':table_summary(artifact_path(run,'exported-table/feature-table.tsv'))['asv_count']},['使用过滤后的代表序列构建系统发育树，供 Faith PD 和 UniFrac 使用。'])
     depth_counts=totals(run)
-    curve_depth=integer(c,'max_depth',3,100000000) if c.get('max_depth','').strip() else int(max(depth_counts.values()))
-    if curve_depth<3: raise ValueError('抽平曲线最大深度至少为 3，才能生成两个或更多深度点')
+    maximum_count=int(max(depth_counts.values(),default=0))
+    requested_curve_depth=integer(c,'max_depth',3,100000000) if c.get('max_depth','').strip() else None
+    curve_depth=min(requested_curve_depth,maximum_count) if requested_curve_depth is not None else maximum_count
+    if curve_depth<3: raise ValueError(f'过滤后最大样本计数为 {maximum_count}；抽平曲线最大深度至少为 3，才能生成两个或更多深度点')
+    curve_warnings=[]
+    if requested_curve_depth is not None and requested_curve_depth>maximum_count:
+        curve_warnings.append(f'请求的曲线最大深度 {requested_curve_depth} 超过过滤后最大样本计数 {maximum_count}，本次使用 {curve_depth}；原请求值已保留。')
+    saved['requested_curve_max_depth']=requested_curve_depth
     saved['effective_curve_max_depth']=curve_depth
+    saved['curve_depth_warnings']=curve_warnings
     (run/'parameters.json').write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding='utf8')
     curve_metrics=['shannon','simpson','chao1','faith_pd','observed_features','goods_coverage','pielou_e']
     curve_steps=min(10,curve_depth-1)
-    begin_stage(job,'06_rarefaction','多深度抽平曲线',{'min_depth':1,'max_depth':curve_depth,'steps':curve_steps,'iterations':10,'source':'filtered unrarefied table','metrics':curve_metrics})
+    begin_stage(job,'06_rarefaction','多深度抽平曲线',{'min_depth':1,'max_depth':curve_depth,'requested_max_depth':requested_curve_depth,'effective_max_depth':curve_depth,'maximum_sample_count':maximum_count,'warnings':curve_warnings,'steps':curve_steps,'iterations':10,'source':'filtered unrarefied table','metrics':curve_metrics})
     q(job,c,'diversity','alpha-rarefaction','--i-table','filtered-table.qza','--i-phylogeny','rooted-tree.qza','--m-metadata-file','metadata.tsv','--p-min-depth','1','--p-max-depth',curve_depth,'--p-steps',curve_steps,'--p-iterations','10','--p-metrics',*curve_metrics,'--o-visualization','alpha-rarefaction.qzv')
     export_artifact(job,c,'alpha-rarefaction.qzv','exported-rarefaction')
     depth_advice=depth_advice_for_run(run)
     (run/'depth_recommendation.json').write_text(json.dumps(depth_advice,ensure_ascii=False,indent=2),encoding='utf8')
     job.setdefault('result',{})['depth_advice']=depth_advice
-    finish_stage(job,{'sample_depths':depth_counts,'max_depth':curve_depth,'metrics':curve_metrics,'depth_advice':depth_advice},['此处只生成多个深度的诊断曲线，原始过滤后特征表不被覆盖。','正式抽平深度推荐为严格低于本批最低过滤后 reads 的最大整百数；可人工修改，不读取 P 值。','曲线的三点平台判断独立显示，阈值为工作站启发式，不是官方唯一最佳深度。','Pielou 均匀度的 QIIME 曲线参数名为 pielou_e，核心分析保存的向量名为 evenness。'])
+    if curve_warnings: job['result']['curve_depth_warnings']=curve_warnings
+    finish_stage(job,{'sample_depths':depth_counts,'max_depth':curve_depth,'requested_max_depth':requested_curve_depth,'effective_max_depth':curve_depth,'warnings':curve_warnings,'metrics':curve_metrics,'depth_advice':depth_advice},['此处只生成多个深度的诊断曲线，原始过滤后特征表不被覆盖。','正式抽平深度推荐为严格低于本批最低过滤后 reads 的最大整百数；可人工修改，不读取 P 值。','曲线的三点平台判断独立显示，阈值为工作站启发式，不是官方唯一最佳深度。','Pielou 均匀度的 QIIME 曲线参数名为 pielou_e，核心分析保存的向量名为 evenness。',*curve_warnings])
     from abundance_tables import run_abundance
     abundance=run_abundance(job,saved,module_api())
     job.setdefault('result',{})['abundance']=abundance
@@ -611,12 +628,9 @@ def alpha_skip_reason(filename,rows):
     if len(data)<2: raise ValueError('导出的 alpha 向量为空')
     values={r[0]:float(r[1]) for r in data[1:] if r and not r[0].startswith('#q2:')}
     if not all(sid in values for sid,_ in rows): raise ValueError('导出的 alpha 向量与保留样本不匹配')
-    groups={g for _,g in rows}
     if len(set(values.values()))==1: return '指标在所有样本中完全相同，KW 无法检验'
-    gs=sorted(groups)
-    for i,g in enumerate(gs):
-        for h in gs[i+1:]:
-            if len({values[sid] for sid,group in rows if group in (g,h)})==1: return f'{g} 与 {h} 的指标完全相同，QIIME 两两 KW 无法检验'
+    # QIIME omits an identical pair itself; other pairs and the overall KW
+    # remain estimable and must not be discarded with that one comparison.
     return ''
 
 def distance_skip_reason(filename):
@@ -666,7 +680,8 @@ def diversity(job,c):
     (sub/'qiime_outputs_complete.json').write_text(json.dumps({'completed_at':time.time()}))
     finish_stage(job,{'alpha_metrics':alpha_metrics,'beta_metrics':['weighted_unifrac','unweighted_unifrac','bray_curtis','jaccard'],'rarefied_table':table_summary(artifact_path(sub,'exported-rarefied-table/feature-table.tsv'))},['七项 alpha 指标与四套距离/PCoA 均来自本次保存的抽平表。'])
 
-    begin_stage(job,'03_statistics','α Kruskal–Wallis 与 β PERMANOVA / PERMDISP',{'permutations':perms,'group_column':'Group'})
+    group_sizes={g:sum(group==g for _,group in rows) for g in sorted(groups)}
+    begin_stage(job,'03_statistics','α Kruskal–Wallis 与 β PERMANOVA / PERMDISP',{'permutations':perms,'group_column':'Group','group_sizes':group_sizes,'design':'independent samples; Group only; unrestricted permutations','pairwise_fdr_scope':'BH within each alpha metric or beta metric/method; overall P values unadjusted'})
     stats=[]
     for metric in alpha_metrics:
         reason=alpha_skip_reason(artifact_path(sub,f'exports/alpha/{metric}/alpha-diversity.tsv'),rows)
@@ -678,8 +693,11 @@ def diversity(job,c):
         stats[-1]['status']='executed'
         artifact_path(sub,'statistics_status.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8')
     for metric in ['weighted_unifrac','unweighted_unifrac','bray_curtis','jaccard']:
-        reason=distance_skip_reason(artifact_path(sub,f'exports/distance/{metric}/distance-matrix.tsv'))
+        distance_reason=distance_skip_reason(artifact_path(sub,f'exports/distance/{metric}/distance-matrix.tsv'))
         for method in ['permanova','permdisp']:
+            reason=distance_reason
+            if not reason and method=='permdisp' and min(group_sizes.values())<3:
+                reason='至少一组仅2个样本；到组中位点的距离退化，跳过 PERMDISP，不生成 P 值'
             stats.append({'metric':metric,'method':method,'status':'skipped' if reason else 'pending','reason':reason})
             artifact_path(sub,'statistics_status.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8')
             if reason: continue
@@ -689,7 +707,7 @@ def diversity(job,c):
             artifact_path(sub,'statistics_status.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf8')
     inventory(sub)
     (sub/'qiime_statistics_complete.json').write_text(json.dumps({'completed_at':time.time()}))
-    finish_stage(job,{'executed':sum(x['status']=='executed' for x in stats),'skipped':sum(x['status']=='skipped' for x in stats),'tests':stats},['检验采用 QIIME 2 保存的结果；常数指标或全零距离会注明原因并跳过，不生成虚构 P 值。'])
+    finish_stage(job,{'executed':sum(x['status']=='executed' for x in stats),'skipped':sum(x['status']=='skipped' for x in stats),'tests':stats},['检验采用 QIIME 2 保存的结果；常数指标、全零距离或 PERMDISP 组内样本不足会注明原因并跳过，不生成虚构 P 值。','仅支持独立样本的 Group 单因素比较；未调整笼位、重复测量或协变量。','BH 只校正每项 alpha 或每项 beta 距离/方法内的两两比较；总体 P 值未跨指标校正。']+(['至少一组少于5个样本；KW 的卡方近似可能不可靠，结果应视为探索性。'] if min(group_sizes.values())<5 else []))
     begin_stage(job,'04_R_figures','R 绘图：读取保存的 QIIME 2 结果',{'font':saved['font'],'r_env':saved.get('r_env','16s-workstation-r')})
     command(job,r_command(saved,str(ROOT/'render.R'),str(sub),saved['font'],str(run),saved.get('plot_scripts',''),str(style_file),'',str(plot_file)),sub,process_env=r_execution_env(saved))
     figure_root=artifact_path(sub,'R_original_style')
@@ -842,7 +860,7 @@ def extension(job,c,kind):
     observed=totals(parent)
     if set(observed)-{sample['SampleID'] for sample in parent_samples}: raise ValueError('过滤后表中存在未列入本批分组的样本')
     selected=[sample for sample in parent_samples if sample['SampleID'] in observed]
-    if kind in ('differential','lefse') and {sample['Group'] for sample in selected}!={sample['Group'] for sample in parent_samples}:
+    if kind in ('differential','lefse','advanced') and {sample['Group'] for sample in selected}!={sample['Group'] for sample in parent_samples}:
         raise ValueError('过滤后某个组已没有有效样本，不能忽略该组进行差异分析')
     style=resolve_group_style(c,selected,fallback=saved)
     plotting=resolve_plot_settings(c,fallback=saved)
@@ -861,6 +879,10 @@ def extension(job,c,kind):
         from abundance_tables import run_abundance
         result=run_abundance(job,saved,api,source_run=parent)
         job['result']={'abundance_run':str(run),'abundance':result}
+    elif kind=='advanced':
+        from advanced_analysis import run_advanced
+        job['result']=run_advanced(job,c,saved,parent,api)
+        job['step']='高级分析完成；查看各模块状态、结果和独立图片'
     elif kind=='differential':
         from differential_analysis import run_differential
         result=run_differential(job,c,saved,parent,api)
@@ -880,7 +902,7 @@ def extension(job,c,kind):
     else: raise ValueError('未知扩展分析')
     completion=run/(kind.replace('-','_')+'_complete.json')
     if not completion.exists(): completion.write_text(json.dumps({'completed_at':time.time(),'preprocess':str(parent)}),encoding='utf8')
-    job['step']={'abundance':'ASV 与 L2–L7 丰度及相对丰度导出完成','differential':'门到属差异菌分析完成','lefse':'LEfSe 分析及图片完成','lefse-render':'按所选 LDA 阈值重绘完成，未重算检验','functional':'PICRUSt2 预测及自选 KO 注释汇总完成'}[kind]
+    job['step']={'abundance':'ASV 与 L2–L7 丰度及相对丰度导出完成','advanced':'高级分析完成；查看各模块状态、结果和独立图片','differential':'门到属差异菌分析完成','lefse':'LEfSe 分析及图片完成','lefse-render':'按所选 LDA 阈值重绘完成，未重算检验','functional':'PICRUSt2 预测及自选 KO 注释汇总完成'}[kind]
 
 def worker(job,action,c):
     try:
@@ -899,10 +921,13 @@ def worker(job,action,c):
         elif action=='diversity': diversity(job,c)
         elif action=='diversity-render': render_saved_diversity(job,c)
         elif action=='differential-render': render_saved_differential(job,c)
+        elif action=='advanced-render':
+            from advanced_analysis import render_saved_advanced
+            render_saved_advanced(job,c,module_api())
         elif action=='figure-render':
             from figure_editor import render_figure
             render_figure(job,c,module_api())
-        elif action in ('abundance','differential','lefse','lefse-render','functional'): extension(job,c,action)
+        elif action in ('abundance','differential','lefse','lefse-render','functional','advanced'): extension(job,c,action)
         if action in ('inspect','preflight'): save_check_results(job,c,action)
         job['status']='done'
     except Exception as e:
@@ -941,6 +966,28 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get('Host') not in (f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'): return False
         return self.headers.get('X-Workstation-Token')==TOKEN
     def do_GET(self):
+        guide_files={'/guide/index.html':'static/guide/index.html',
+                     '/guide/USER_GUIDE.md':'docs/USER_GUIDE.md',
+                     '/guide/USER_GUIDE.docx':'docs/USER_GUIDE.docx',
+                     '/guide/WINDOWS_DEPLOYMENT.md':'docs/WINDOWS_DEPLOYMENT.md',
+                     '/guide/METHODS_AUDIT.md':'docs/METHODS_AUDIT.md'}
+        guide=guide_files.get(urlparse(self.path).path)
+        if guide:
+            if self.headers.get('Host') not in (f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'):
+                self.send({'error':'Host rejected'},403); return
+            filename=ROOT/guide
+            if not filename.is_file(): self.send({'error':'说明文件尚未构建，请更新完整源码'},404); return
+            body=filename.read_bytes()
+            self.send_response(200)
+            content_type=mimetypes.guess_type(filename.name)[0] or 'application/octet-stream'
+            self.send_header('Content-Type',content_type+('; charset=utf-8' if filename.suffix in ('.html','.md') else ''))
+            self.send_header('Content-Length',str(len(body)))
+            self.send_header('Cache-Control','no-store')
+            self.send_header('X-Content-Type-Options','nosniff')
+            self.send_header('Content-Security-Policy',"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'")
+            if filename.suffix!='.html':
+                self.send_header('Content-Disposition',"attachment; filename*=UTF-8''"+quote(filename.name))
+            self.end_headers(); self.wfile.write(body); return
         if self.path=='/api/health':
             if self.headers.get('Host') not in (f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'):
                 self.send({'error':'Host rejected'},403); return
@@ -1029,7 +1076,7 @@ class Handler(BaseHTTPRequestHandler):
                     except ProcessLookupError: pass
                 self.send({'ok':True}); return
             action=self.path.removeprefix('/api/')
-            if action not in ('preflight','inspect','quality','recommend','preprocess','resume-abundance','diversity','diversity-render','differential-render','figure-render','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
+            if action not in ('preflight','inspect','quality','recommend','preprocess','resume-abundance','diversity','diversity-render','differential-render','advanced','advanced-render','figure-render','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
             self.send({'id':launch(action,c)})
         except Exception as e: self.send({'error':str(e)},400)
 

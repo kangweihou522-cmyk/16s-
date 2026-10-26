@@ -365,7 +365,7 @@ class BackendTests(unittest.TestCase):
         filename.write_text("sample-id\tvalue\nA1\t1\nA2\t2\nB1\t3\nB2\t4\n", encoding="utf8")
         self.assertEqual(app.alpha_skip_reason(filename, rows), "")
         filename.write_text("sample-id\tvalue\nA1\t1\nA2\t1\nB1\t1\nB2\t1\nC1\t2\nC2\t3\n", encoding="utf8")
-        self.assertIn("两两", app.alpha_skip_reason(filename, rows + [("C1", "HDC"), ("C2", "HDC")]))
+        self.assertEqual(app.alpha_skip_reason(filename, rows + [("C1", "HDC"), ("C2", "HDC")]), "")
 
     def test_zero_distances_are_skipped_but_nonzero_distances_not_skipped(self):
         filename = self.root / "distance-matrix.tsv"
@@ -442,8 +442,12 @@ class BackendTests(unittest.TestCase):
         alpha = [a for a in qiime_calls if a[:2] == ("diversity", "alpha-group-significance")]
         beta = [a for a in qiime_calls if a[:2] == ("diversity", "beta-group-significance")]
         self.assertEqual(len(alpha), 7)
-        self.assertEqual(len(beta), 8)
-        self.assertEqual({a[a.index("--p-method") + 1] for a in beta}, {"permanova", "permdisp"})
+        self.assertEqual(len(beta), 4)
+        self.assertEqual({a[a.index("--p-method") + 1] for a in beta}, {"permanova"})
+        status = json.loads(app.artifact_path(Path(job["run"]), "statistics_status.json").read_text())
+        dispersion = [row for row in status if row["method"] == "permdisp"]
+        self.assertEqual(len(dispersion), 4)
+        self.assertTrue(all(row["status"] == "skipped" and "2个样本" in row["reason"] for row in dispersion))
         self.assertTrue(all("--p-pairwise" in a for a in beta))
         self.assertTrue(any("Rscript" in a for a in commands))
         render_args, render_env = next((a, e) for a, e in zip(commands, command_envs) if "Rscript" in a)
