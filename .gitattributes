@@ -1,0 +1,3 @@
+# Preserve Windows entry-point bytes and accept their CRLF line endings.
+*.bat -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*.ps1 -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

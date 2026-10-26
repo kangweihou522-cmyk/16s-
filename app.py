@@ -12,8 +12,10 @@ from execution_record import prepare_execution, capture_r_sources, command_expla
 from group_style import resolve_group_style, save_group_style
 from plot_settings import resolve_plot_settings, save_plot_settings, ui_schema
 from sequence_structure import inspect_samples, save_report as save_sequence_report, export_clean_fastq
+from deployment_context import SERVICE_ID, load_context, frontend_defaults, public_context
 
 ROOT = Path(__file__).resolve().parent
+DEPLOYMENT = load_context(ROOT)
 
 def module_api():
     from types import SimpleNamespace
@@ -28,14 +30,22 @@ def service_identity():
         result=subprocess.run(['git','-C',str(ROOT),'rev-parse','--short','HEAD'],text=True,capture_output=True,timeout=3)
         if result.returncode==0: revision=result.stdout.strip()
     except (OSError,subprocess.TimeoutExpired): pass
+    if DEPLOYMENT:
+        revision = DEPLOYMENT.get('version', revision)
     return {'revision':revision,'source_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-            'directory':str(ROOT),'pid':os.getpid(),
+            'directory':str(ROOT),'pid':os.getpid(),'deployment':public_context(DEPLOYMENT),
             'started_at':datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds')}
 
 RUNTIME = service_identity()
 TOKEN = secrets.token_urlsafe(32)
+INSTANCE_ID = secrets.token_hex(16)
 JOBS = {}
 LOCK = threading.Lock()
+STOPPING = False
+
+def jobs_busy():
+    # Final command/source archives and inventories are part of a running task.
+    return any(j.get('status')=='running' or j.get('_execution') is not None for j in JOBS.values())
 IUPAC = dict(zip('ACGTRYSWKMBDHVN', ['A','C','G','T','AG','CT','CG','AT','GT','AC','CGT','AGT','ACT','ACG','ACGT']))
 PRIMERS = {'341F': 'CCTACGGGNGGCWGCAG', '338F': 'ACTCCTACGGGAGGCAGCAG', '806R': 'GGACTACHVGGGTWTCTAAT'}
 
@@ -904,15 +914,23 @@ def worker(job,action,c):
             try: finalize_execution(job)
             except Exception as error:
                 job['status']='failed'; job['error']=str(job.get('error',''))+'；分析结果保留，但运行代码说明保存失败：'+str(error)
-            inventory(Path(job['run']))
-            Path(job['run'],'job_status.json').write_text(json.dumps({k:v for k,v in job.items() if k!='pid' and not k.startswith('_')},ensure_ascii=False,indent=2),encoding='utf8')
+            try:
+                inventory(Path(job['run']))
+                Path(job['run'],'job_status.json').write_text(json.dumps({k:v for k,v in job.items() if k!='pid' and not k.startswith('_')},ensure_ascii=False,indent=2),encoding='utf8')
+            except Exception as error:
+                job['status']='failed'; job['error']=str(job.get('error',''))+'；保存任务清单失败：'+str(error)
         job.pop('_execution',None)
 
 def launch(action,c):
     with LOCK:
-        if any(j['status']=='running' for j in JOBS.values()): raise ValueError('已有任务运行中，请等待或停止后再开始')
+        if STOPPING: raise ValueError('工作站正在停止或更新，请等待重新启动')
+        if jobs_busy(): raise ValueError('已有任务运行中，请等待或停止后再开始')
         jid=uuid.uuid4().hex
-        job={'id':jid,'action':action,'status':'running','step':'准备任务','log':str(ROOT/('job_'+jid+'.log'))}; JOBS[jid]=job
+        log_root=ROOT
+        if DEPLOYMENT:
+            log_root=Path(DEPLOYMENT['root_wsl'])/'日志'/'tasks'/jid
+            log_root.mkdir(parents=True,exist_ok=True)
+        job={'id':jid,'action':action,'status':'running','step':'准备任务','log':str(log_root/('job_'+jid+'.log'))}; JOBS[jid]=job
     threading.Thread(target=worker,args=(job,action,c),daemon=True).start(); return jid
 
 class Handler(BaseHTTPRequestHandler):
@@ -923,15 +941,25 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get('Host') not in (f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'): return False
         return self.headers.get('X-Workstation-Token')==TOKEN
     def do_GET(self):
+        if self.path=='/api/health':
+            if self.headers.get('Host') not in (f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'):
+                self.send({'error':'Host rejected'},403); return
+            with LOCK:
+                busy = jobs_busy()
+            self.send({'service_id':SERVICE_ID,'install_root':DEPLOYMENT.get('root_wsl',''),
+                       'program_dir':str(ROOT),'pid':os.getpid(),'instance_id':INSTANCE_ID,
+                       'port':self.server.server_port,'busy':busy,'accepting_jobs':not STOPPING,
+                       'revision':RUNTIME['revision']}); return
         if self.path=='/':
             if self.headers.get('Host') not in (f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'):
                 self.send({'error':'Host rejected'},403); return
-            body=(ROOT/'index.html').read_text(encoding='utf8').replace('__TOKEN__',TOKEN).replace('__PLOT_SCHEMA__',json.dumps(ui_schema(),ensure_ascii=False).replace('<','\\u003c')).encode()
+            body=(ROOT/'index.html').read_text(encoding='utf8').replace('__TOKEN__',TOKEN).replace('__PLOT_SCHEMA__',json.dumps(ui_schema(),ensure_ascii=False).replace('<','\\u003c')).replace('__DEPLOYMENT_DEFAULTS__',json.dumps(frontend_defaults(DEPLOYMENT),ensure_ascii=False).replace('<','\\u003c')).encode()
             self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-store'); self.send_header('Content-Security-Policy',"frame-ancestors 'none'"); self.end_headers(); self.wfile.write(body); return
         if not self.authorized(): self.send({'error':'访问被拒绝'},403); return
         try:
             u=urlparse(self.path); p=parse_qs(u.query)
             if u.path=='/api/runtime': self.send(RUNTIME)
+            elif u.path=='/api/deployment': self.send(public_context(DEPLOYMENT))
             elif u.path=='/api/batches':
                 from batch_context import list_batches
                 self.send(list_batches(p['root'][0],module_api()))
@@ -979,11 +1007,21 @@ class Handler(BaseHTTPRequestHandler):
             else: self.send({'error':'Not found'},404)
         except Exception as e: self.send({'error':str(e)},400)
     def do_POST(self):
+        global STOPPING
         if not self.authorized(): self.send({'error':'访问被拒绝'},403); return
         try:
             length=int(self.headers.get('Content-Length','0'))
             if not 0<length<=100000: raise ValueError('请求大小异常')
             c=json.loads(self.rfile.read(length))
+            if self.path=='/api/station-stop':
+                if not DEPLOYMENT:
+                    self.send({'error':'请在原启动终端停止未部署的工作站'},409); return
+                with LOCK:
+                    if jobs_busy():
+                        self.send({'error':'分析任务仍在运行，请完成或取消后再停止、更新'},409); return
+                    STOPPING=True
+                self.send({'stopping':True})
+                threading.Thread(target=self.server.shutdown,daemon=True).start(); return
             if self.path=='/api/stop':
                 j=JOBS[c['id']]; j['cancel']=True
                 if j.get('pid'):
@@ -999,6 +1037,15 @@ def main():
     import argparse
     parser=argparse.ArgumentParser(); parser.add_argument('--port',type=int,default=8765); parser.add_argument('--no-browser',action='store_true'); args=parser.parse_args()
     server=ThreadingHTTPServer(('127.0.0.1',args.port),Handler)
+    control=None
+    if DEPLOYMENT:
+        control=Path(DEPLOYMENT['root_wsl'])/'配置/service.json'
+        record={'token':TOKEN,'pid':os.getpid(),'instance_id':INSTANCE_ID,'port':args.port,
+                'program_dir':str(ROOT),'install_root':DEPLOYMENT['root_wsl']}
+        temporary=control.with_suffix('.tmp')
+        temporary.write_text(json.dumps(record),encoding='utf8')
+        temporary.chmod(0o600)
+        temporary.replace(control)
     print(f'16S 工作站已启动：http://localhost:{args.port}\n服务版本：{RUNTIME["revision"]}\n代码目录：{ROOT}\n关闭终端会停止工作站。',flush=True)
     if not args.no_browser:
         try: subprocess.Popen(['cmd.exe','/c','start','',f'http://localhost:{args.port}'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -1011,4 +1058,8 @@ def main():
                 try: os.killpg(j['pid'],signal.SIGTERM)
                 except ProcessLookupError: pass
         server.server_close()
+        if control and control.is_file():
+            try:
+                if json.loads(control.read_text())['instance_id']==INSTANCE_ID: control.unlink()
+            except (OSError,ValueError,KeyError): pass
 if __name__=='__main__': main()

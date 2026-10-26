@@ -40,6 +40,7 @@ def prepare_execution(job, root, action, config, runtime):
         ('quality_advice.py', '读取逐位置质量统计，生成 DADA2 参数建议。'),
         ('sequence_structure.py', '完整候选引物、方向与前方附加序列检测，clean FASTQ及残留报告。'),
         ('batch_context.py', '按已保存的批次来源只读恢复历史阶段结果，防止不同任务目录混用。'),
+        ('deployment_context.py', '读取已部署的目录与环境默认值；不修改既有分析输入和结果。'),
         ('depth_advice.py', '依据过滤后样本计数推荐抽平深度，另附曲线诊断。'),
         ('group_style.py', '统一的分组名称、显示顺序和十六进制配色；不改变统计设计。'),
         ('plot_settings.py', '各图种的尺寸、字号、显示和导出参数；不重算统计结果。'),
