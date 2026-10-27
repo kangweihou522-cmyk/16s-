@@ -325,31 +325,81 @@ function Get-DownloadProxy {
     return $system
 }
 
+function Invoke-ArchiveTransfer {
+    param([Uri]$Uri,[string]$Destination,$Proxy,[int]$RemainingMs)
+    if ($Uri.Scheme -ne 'https' -or $RemainingMs -le 0) { throw '源码下载地址或剩余时间无效。' }
+    [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $request=[Net.HttpWebRequest]::Create($Uri)
+    $request.Timeout=[Math]::Min(30000,$RemainingMs)
+    $request.ReadWriteTimeout=[Math]::Min(30000,$RemainingMs)
+    $request.UserAgent='16s-workstation/2'; $request.Proxy=$Proxy
+    $response=$null; $input=$null; $output=$null
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    try {
+        $response=$request.GetResponse()
+        if ($response.ResponseUri.Scheme -ne 'https' -or [int]$response.StatusCode -ne 200) {
+            throw '源码下载未返回完整HTTPS响应。'
+        }
+        $expected=[long]$response.ContentLength
+        if ($expected -gt 104857600) { throw '源码归档超过100MB限制，已拒绝。' }
+        $input=$response.GetResponseStream()
+        $output=[IO.File]::Open($Destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        $buffer=New-Object byte[] 65536; [long]$received=0
+        while ($true) {
+            $remaining=$RemainingMs-[int]$watch.ElapsedMilliseconds
+            if ($remaining -le 0) { throw '源码下载已达到总时间上限。' }
+            if ($input.CanTimeout) { $input.ReadTimeout=[Math]::Min(30000,$remaining) }
+            $read=$input.Read($buffer,0,$buffer.Length)
+            if ($read -le 0) { break }
+            $received+=$read
+            if ($received -gt 104857600) { throw '源码归档超过100MB限制，已拒绝。' }
+            $output.Write($buffer,0,$read)
+            $status=('{0:N1} MB 已下载' -f ($received/1MB))
+            if ($expected -gt 0) { Write-Progress -Id 17 -Activity '下载16S工作站源码' -Status $status -PercentComplete ([Math]::Min(100,[int](100*$received/$expected))) }
+            else { Write-Progress -Id 17 -Activity '下载16S工作站源码' -Status $status }
+        }
+        if ($received -le 0 -or ($expected -ge 0 -and $received -ne $expected)) { throw '源码下载不完整，未使用此文件。' }
+    } finally {
+        if ($output) { $output.Dispose() }
+        if ($input) { $input.Dispose() }
+        if ($response) { $response.Dispose() }
+        $request.Abort(); $watch.Stop()
+        Write-Progress -Id 17 -Activity '下载16S工作站源码' -Completed
+    }
+}
+
 function Save-SourceArchive {
     param([string]$Root,[string]$Archive)
-    [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $uri=[Uri]'https://github.com/kangweihou522-cmyk/16s-/archive/refs/heads/main.zip'
-    $request=[Net.HttpWebRequest]::Create($uri)
-    $request.Timeout=45000; $request.ReadWriteTimeout=45000
-    $request.UserAgent='16s-workstation/1'; $request.Proxy=Get-DownloadProxy $Root
-    $watch=[Diagnostics.Stopwatch]::StartNew()
-    $response=$request.GetResponse()
+    if (Test-Path -LiteralPath $Archive) { throw '目标源码归档已存在，未覆盖。' }
+    # Avoid the extra github.com redirect. Keep HTTPS and the configured Windows proxy.
+    $uri=[Uri]'https://codeload.github.com/kangweihou522-cmyk/16s-/zip/refs/heads/main'
+    $downloadProxy=Get-DownloadProxy $Root
+    $watch=[Diagnostics.Stopwatch]::StartNew(); $lastError='网络不可用'; $attempts=0
     try {
-        if ($response.ResponseUri.Scheme -ne 'https') { throw '源码下载没有保持 HTTPS，已拒绝。' }
-        $input=$response.GetResponseStream()
-        $output=[IO.File]::Open($Archive,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
-        try {
-            $buffer=New-Object byte[] 65536
-            while ($true) {
-                $remaining=45000-[int]$watch.ElapsedMilliseconds
-                if ($remaining -le 0) { throw 'GitHub 源码下载超时（45 秒），当前版本保持原样。' }
-                if ($input.CanTimeout) { $input.ReadTimeout=$remaining }
-                $read=$input.Read($buffer,0,$buffer.Length)
-                if ($read -le 0) { break }
-                $output.Write($buffer,0,$read)
+        for ($attempt=1;$attempt -le 3;$attempt++) {
+            $remaining=180000-[int]$watch.ElapsedMilliseconds
+            if ($remaining -le 0) { break }
+            $attempts=$attempt
+            $partial=$Archive+'.'+[Guid]::NewGuid().ToString('N')+'.part'
+            Write-Host "下载尝试 $attempt/3（总等待上限180秒；当前版本保留）…"
+            try {
+                Invoke-ArchiveTransfer -Uri $uri -Destination $partial -Proxy $downloadProxy -RemainingMs $remaining
+                $length=(Get-Item -LiteralPath $partial -ErrorAction Stop).Length
+                if ($length -le 0 -or $length -gt 104857600) { throw '源码归档为空或超过100MB限制。' }
+                [IO.File]::Move($partial,$Archive)
+                return
+            } catch {
+                $lastError=$_.Exception.GetBaseException().Message
+                if ($lastError -match 'timed?\s*out|timeout|超时') { $lastError='连接或读取超时' }
+                if ($attempt -lt 3 -and $watch.ElapsedMilliseconds -lt 180000) {
+                    Write-Warning ("第 $attempt 次下载未完成："+$lastError+'。将重新下载，不使用残缺文件。')
+                }
+            } finally {
+                if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue }
             }
-        } finally { $output.Dispose(); $input.Dispose() }
-    } finally { $response.Dispose(); $watch.Stop() }
+        }
+    } finally { $watch.Stop() }
+    throw ("GitHub源码下载失败（已尝试 $attempts 次，总等待上限180秒）："+$lastError+'。当前程序、环境和分析结果保持原样；可直接使用启动工作站.bat。也可在浏览器下载完整源码，解压后运行部署工作站.bat并选择原安装目录进行离线源码更新。')
 }
 
 function Assert-SafeArchive {

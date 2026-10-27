@@ -58,6 +58,10 @@ Windows 负责选择目录、桌面入口和下载更新；现有 WSL Ubuntu 与
 
 使用 `{"proxy":"direct"}` 表示直接连接；不要在文件中放代理密码。下载保留 TLS 校验，网络失败时使用当前安装版本。
 
+源码更新直接从 GitHub 的 `codeload.github.com` 下载，最多3次尝试共享180秒下载预算，显示进度；连接/单次读取最长30秒。每次重试使用独立临时文件，残缺文件不作为源码；下载成功并检查后才进入候选版本准备，不会因下载失败停止旧服务。
+
+若旧版更新器显示“使用3个参数调用Read…操作已超时”，这发生在源码下载阶段，旧程序和结果仍在。旧更新器无法自动获得自己的下载修复；可先用“启动工作站.bat”继续工作。一次性修复可下载最新版 `windows/Workstation.ps1` 后在Windows PowerShell以`-Action Update`运行，并选择原安装目录；或在浏览器下载[完整源码ZIP（直接下载）](https://codeload.github.com/kangweihou522-cmyk/16s-/zip/refs/heads/main)，解压后运行其中的`部署工作站.bat`，选择**原安装目录**完成本地源码更新。无需重装WSL/Conda或移动分析结果。
+
 也可从解压目录的 PowerShell 明确指定初次部署参数：
 
 ```powershell
