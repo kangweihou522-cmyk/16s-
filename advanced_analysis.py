@@ -281,7 +281,10 @@ def render_saved_advanced(job, config, api):
     (run / 'parameters.json').write_text(json.dumps({
         'extension': 'advanced-render', 'preprocess': previous['preprocess'], 'advanced_run': str(analysis),
         'config': dict(saved, **style, plot_settings=plotting), 'statistics_refit': False}, ensure_ascii=False, indent=2), encoding='utf8')
-    runtime = dict(saved, r_env=original['r_env'])
+    runtime = dict(saved, r_env=config.get('advanced_env') or original['r_env'])
+    if config.get('conda'): runtime['conda'] = config['conda']
+    options['r_env'] = runtime['r_env']
+    filename.write_text(json.dumps(options, ensure_ascii=False, indent=2), encoding='utf8')
     api.begin_stage(job, '03_figures', '从高级分析缓存重绘', {'statistics_refit': False})
     api.command(job, api.r_command(runtime, str(api.ROOT / 'advanced_analysis.R'), '--render', str(filename), str(run)),
                 run, process_env=api.r_execution_env(runtime))

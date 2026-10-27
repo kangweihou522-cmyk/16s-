@@ -117,13 +117,19 @@ class AdvancedAnalysisTests(unittest.TestCase):
             (out / 'render_summary.json').write_text(json.dumps(dict(summary, top_n=7,
                 plot_settings=options['plot_settings'], visual_options={'heatmap_low': '#123456'})))
         job = {'status': 'running'}
+        runtimes = []
+        def r_command(config, *args):
+            runtimes.append(config)
+            return ['Rscript', *args]
         with patch.object(app, 'q') as qiime, patch.object(app, 'command', side_effect=render), \
-                patch.object(app, 'r_command', side_effect=lambda c, *args: ['Rscript', *args]), \
+                patch.object(app, 'r_command', side_effect=r_command), \
                 patch.object(app, 'r_execution_env', return_value={}):
             app.worker(job, 'figure-render', {'image': str(png), 'diff_plot_top_n': 7,
+                                             'advanced_env': 'advanced-repaired',
                                              'heatmap_low': '#123456', 'plot_settings': {'heatmap': {'width': 9}}})
         self.assertEqual(job['status'], 'done', job.get('error'))
         self.assertEqual(len(calls), 1); qiime.assert_not_called()
+        self.assertEqual(runtimes[0]['r_env'], 'advanced-repaired')
         self.assertEqual(job['result']['figure']['visual_options']['diff_plot_top_n'], 7)
         for path, raw in before.items():
             self.assertEqual(path.read_bytes(), raw)

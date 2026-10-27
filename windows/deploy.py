@@ -34,7 +34,7 @@ SOURCE_FILES = {'README.md', 'VALIDATION.md', 'SHA256SUMS.txt', '启动.sh', '�
 IGNORE = {'.git', '.venv', 'runs', 'updates', '__pycache__', '.cache', '.pytest_cache',
           '原始数据', '参考文件', '分析结果', '日志', '配置', '程序', 'node_modules'}
 REQUIRED = ['app.py', 'index.html', 'launch.py', 'run_layout.py', 'batch_context.py', 'deployment_context.py',
-            'advanced_analysis.py', 'advanced_analysis.R', 'qc_report.py',
+            'advanced_analysis.py', 'advanced_analysis.R', 'qc_report.py', 'recovery.py', 'external_inputs.py',
             'abundance_tables.py', 'depth_advice.py', 'differential_analysis.py',
             'execution_record.py', 'figure_editor.py', 'functional_prediction.py',
             'group_style.py', 'lefse_analysis.py', 'plot_settings.py', 'quality_advice.py',

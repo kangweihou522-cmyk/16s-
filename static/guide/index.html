@@ -322,9 +322,9 @@ QIIME/R、不搬走原数据。</li>
 只检查，<code>停止工作站.bat</code>
 只停止本安装所属的空闲服务。不要依赖关闭浏览器来停止后台分析。</p>
 <p>新部署默认结果在安装目录的 <code>分析结果</code>
-中。浏览器可能记得旧路径，可点击“使用部署默认目录”；这不会搬迁旧结果。历史数据通过“打开历史批次”选择原
-run。默认环境分别为
+中。每次刷新或重新打开页面，默认新建空白批次，不自动带入上次测序、分组、分类器、数据库或结果路径；部署默认输出目录会明确填入。软件环境名与作图偏好可以保留。左侧导航包含各分析区和“任务进度”，窄屏改为顶部横向导航。默认环境分别为
 <code>qiime2-amplicon-2025.7</code>、<code>16s-workstation-r</code>、<code>16s-workstation-ancom</code>、<code>lefse</code>、<code>picrust2</code>，可按本机实际名称修改。环境名存在不代表相应命令和依赖已安装。</p>
+<p>刷新不会停止后台任务。页面可在保持输入空白的同时监看正在运行的任务；已有分析从“任务进度”的最近任务或“打开历史批次”明确打开，再恢复其路径和参数。</p>
 <p>旧 Git 目录仍可在 Ubuntu 内用
 <code>bash 启动.sh</code>，默认端口可能是 8765；它的更新行为与方案 A
 不同。识别当前页面时，应查看网页顶部的实际安装目录、版本目录和服务启动信息，避免连接旧后台。更完整的网络、日志和配置说明见部署文档。</p>
@@ -821,7 +821,73 @@ QZV 查看器。</p>
 <section id="guide-16" class="level2">
 <h2>16. 结果文件、历史批次与可复现记录</h2>
 <p>每次任务创建独立 run，不覆盖原始 FASTQ
-或旧分析。新建批次清除旧批次关联，保留常用软件和作图偏好；历史入口明确恢复相同来源下的完整结果。修改样本、分组或引物后，不能继续把旧质量结果当作新输入。失败的部分结果保留供诊断，但工作站不是任意步骤自动断点续跑工具。</p>
+或旧分析。刷新、重新打开页面或新建批次会清除旧路径关联，保留常用软件和作图偏好；路径只在明确打开历史或失败任务时恢复。修改样本、分组或引物后，不能继续把旧质量结果当作新输入。</p>
+<p><strong>后续模块独立运行</strong>：多样性、丰度导出、差异菌、LEfSe、功能预测和高级分析各有“本模块输入来源”。完整流程完成预处理后会自动填入这些入口；也可只选择本模块的历史任务直接分析，无需重新填写
+FASTQ。选择一个模块的来源不自动替换其他模块输入。</p>
+<p>“外部
+QZA／丰度表”支持其他流程的已有结果，按模块准备独立输入任务：</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>模块</th>
+<th>必需外部输入（均另需 SampleID,Group CSV）</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>多样性</td>
+<td>未抽平计数 QZA/TSV/CSV＋Rooted tree QZA；本模块包含 Faith
+PD/UniFrac，不能缺树</td>
+</tr>
+<tr class="even">
+<td>丰度导出</td>
+<td>未抽平计数＋对应 Taxonomy QZA/TSV</td>
+</tr>
+<tr class="odd">
+<td>ANCOM/LEfSe</td>
+<td>未抽平计数＋对应 Taxonomy
+QZA/TSV；参考组、方法和阈值在各自分析区设置</td>
+</tr>
+<tr class="even">
+<td>功能预测</td>
+<td>未抽平计数＋对应代表序列 QZA/FASTA；后续仍需 KO
+映射等本模块参数</td>
+</tr>
+<tr class="odd">
+<td>高级分析</td>
+<td>未抽平计数＋对应 Taxonomy QZA/TSV；表型关联另选附加表型 CSV</td>
+</tr>
+</tbody>
+</table>
+<p>文本计数表为特征×样本：第一列 <code>FeatureID</code>（也兼容标准 BIOM
+TSV 表头），后续每列一个 SampleID；例如 <code>FeatureID,001,002</code>
+后接
+<code>ASV1,12,34</code>。仅接受非负整数，不接受相对丰度。样本与分组须精确匹配，<code>001</code>
+不等于 <code>1</code>。Taxonomy 至少含 FeatureID/Taxon，可含
+Confidence。计数特征必须被注释/序列/树覆盖；辅助文件多余特征会记录，分类和序列另生成对齐后的派生文件，不修改原文件。仅缺末尾分类层级时可用显式未知占位符，保存补齐报告，不推断分类。</p>
+<p>必须确认计数表没有抽平或归一化；数值恰为整数不能证明来源。程序核查
+QZA
+类型及可识别的抽平/相对量来源，保存源文件副本、SHA256、样本匹配和多余特征报告。成功准备只表示当前所选模块的必需输入已核验，<code>external_inputs_complete.json</code>
+不代表运行过
+DADA2/分类/建树。外部结果的实验与原流程质控仍由数据来源决定；导入不会自动补做此前的污染过滤。</p>
+<p><strong>失败后修改并继续</strong>：</p>
+<ol type="1">
+<li>在左侧“任务进度”找到失败任务，点击“打开并继续失败任务”；记录未列出时选择该失败任务自身的
+run 目录。服务重启后，磁盘 <code>task_state.json</code>
+仍可用于恢复。</li>
+<li>阅读恢复边界与原错误，进入相应分析区修改参数或环境，再点击“应用当前参数并继续此任务”。不要只在空白新批次里输入旧路径便假定会自动续跑。</li>
+<li>已核验导入/去引物检查点的预处理失败，会复制检查点到新 run，从 DADA2
+重新执行后续阶段。若只是丰度导出失败且前面阶段齐全，可仅补做丰度。下游模块失败只重跑该模块；已有完整多样性统计而
+R 绘图失败时，深度/置换未改变可只重绘。</li>
+<li>原始数据、分组、引物、检查点文件或边界之前参数改变，会拒绝复用并要求新任务。旧版任务若没有可核验指纹，会明确提示从导入重跑；程序不保证任意命令级断点续算。外部输入准备失败可独立重新准备，不涉及
+FASTQ。修改外部源文件选择请重新打开外部输入对话框。</li>
+</ol>
+<p>失败目录保持原样，新尝试另存。随机抽平若重新执行可能产生不同结果；只改图的缓存重绘不重新抽平或拟合。不要因多次尝试得到更小
+P 值而择优报告。</p>
 <table>
 <colgroup>
 <col style="width: 50%" />
@@ -861,6 +927,15 @@ QZV 查看器。</p>
 <tr class="odd">
 <td><code>09_execution_code</code></td>
 <td>实际运行代码、参数及命令说明文档</td>
+</tr>
+<tr class="even">
+<td><code>task_state.json</code>、<code>quality_checkpoint.json</code>、<code>abundance_checkpoint.json</code></td>
+<td>可恢复任务记录、完成阶段及源文件/参数指纹；不等于所有中间输出都可跳过</td>
+</tr>
+<tr class="odd">
+<td><code>external_inputs_complete.json</code>、外部任务
+<code>00_inputs</code></td>
+<td>本模块外部来源、原件副本/校验值、样本和特征对齐、支持的模块</td>
 </tr>
 <tr class="even">
 <td><code>说明.md</code>、<code>report.json</code></td>
@@ -1154,7 +1229,7 @@ href="https://cran.r-project.org/package=ppcor">CRAN
 </ol>
 <hr />
 <p>文稿
-SHA256：<code>54f3d85b5ac138f3699bbe9d0b80742882dc73d6bc1f2f0385783517f4d6d46b</code>。网页与
+SHA256：<code>df87b65ea9928d08138efdc8c447da053df62e77dc392998173e85e0dfe80352</code>。网页与
 Word 由同一 Markdown 生成。</p>
 </section>
 </section>

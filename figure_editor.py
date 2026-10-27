@@ -167,6 +167,8 @@ def render_figure(job, request, api):
         samples = [{'Group': g} for g in _json(analysis / 'lefse_complete.json').get('groups', {})]
     style = resolve_group_style(request, samples, fallback=figure['group_style'])
     config = {**style, 'plot_settings': settings, 'plot_target': figure['plot_target'], 'font': figure['font']}
+    config.update({key: request[key] for key in ('env','conda','r_env','advanced_env','lefse_env','ancom_env','font')
+                   if request.get(key) and str(request[key]).strip()})
     if figure['kind'] == 'diversity':
         api.render_saved_diversity(job, dict(config, diversity_run=str(analysis)))
         output = Path(job['run']) / '04_R_figures' / 'R_original_style' / (figure['stem'] + '.png')

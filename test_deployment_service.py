@@ -129,6 +129,9 @@ class DeploymentServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '已有任务运行中'):
             app.launch('inspect', {})
         app.JOBS['saving-code'].pop('_execution')
+        app.JOBS['saving-code']['_task'] = {}
+        self.assertTrue(json.loads(self.request('/api/health')[1])['busy'])
+        app.JOBS['saving-code'].pop('_task')
         self.assertFalse(json.loads(self.request('/api/health')[1])['busy'])
 
     def test_initial_job_logs_are_outside_the_immutable_program(self):

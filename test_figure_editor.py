@@ -65,7 +65,12 @@ class FigureEditorTests(unittest.TestCase):
             with patch.object(app, 'command') as command:
                 app.worker(job, 'figure-render', {'image': str(self.plotroot / 'alpha/shannon.png'), 'plot_settings': settings})
             self.assertEqual(job['status'], 'failed'); command.assert_not_called()
-            self.assertNotIn('run', job)
+            # Early failures now get a separate durable task record; no
+            # rejected preview or source analysis is written or executed.
+            failure = Path(job['run'])
+            self.assertFalse(failure.is_relative_to(self.parent))
+            self.assertEqual(json.loads((failure/'task_state.json').read_text())['status'], 'failed')
+            self.assertFalse(list(failure.rglob('*.png')))
 
     def test_single_diversity_preview_and_repeat_inherit_viewed_settings(self):
         old = self.snapshot()

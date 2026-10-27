@@ -13,6 +13,7 @@ from group_style import resolve_group_style, save_group_style
 from plot_settings import resolve_plot_settings, save_plot_settings, ui_schema
 from sequence_structure import inspect_samples, save_report as save_sequence_report, export_clean_fastq
 from deployment_context import SERVICE_ID, load_context, frontend_defaults, public_context
+from recovery import persist_task, seal_checkpoint, ensure_task_run, recovery_plan, prepare_retry
 
 ROOT = Path(__file__).resolve().parent
 DEPLOYMENT = load_context(ROOT)
@@ -21,7 +22,8 @@ def module_api():
     from types import SimpleNamespace
     names=('ROOT','artifact_path','q','command','r_command','r_execution_env','find_conda','conda_cmd',
            'path','begin_stage','finish_stage','stage_report','export_artifact','probe',
-           'approved_run','approved_file','marker','render_saved_diversity','render_saved_differential')
+           'approved_run','approved_file','marker','render_saved_diversity','render_saved_differential',
+           'discover','JOBS')
     return SimpleNamespace(**{name:globals()[name] for name in names})
 
 def service_identity():
@@ -45,7 +47,7 @@ STOPPING = False
 
 def jobs_busy():
     # Final command/source archives and inventories are part of a running task.
-    return any(j.get('status')=='running' or j.get('_execution') is not None for j in JOBS.values())
+    return any(j.get('status')=='running' or j.get('_execution') is not None or j.get('_task') is not None for j in JOBS.values())
 IUPAC = dict(zip('ACGTRYSWKMBDHVN', ['A','C','G','T','AG','CT','CG','AT','GT','AC','CGT','AGT','ACT','ACG','ACGT']))
 PRIMERS = {'341F': 'CCTACGGGNGGCWGCAG', '338F': 'ACTCCTACGGGAGGCAGCAG', '806R': 'GGACTACHVGGGTWTCTAAT'}
 
@@ -249,10 +251,13 @@ def begin_stage(job,folder,title,parameters=None):
     job['stage_folder']=folder; job['stage_title']=title; job['stage_parameters']=parameters or {}
     job['step']=title
     stage_report(job['run'],folder,title,status='running',parameters=parameters)
+    persist_task(job)
 
 def finish_stage(job,results=None,notes=()):
     stage_report(job['run'],job['stage_folder'],job['stage_title'],parameters=job.get('stage_parameters'),results=results,notes=notes)
+    if job['stage_folder']=='06_rarefaction': seal_checkpoint(job['run'],'abundance')
     job.pop('stage_folder',None); job.pop('stage_title',None); job.pop('stage_parameters',None)
+    persist_task(job)
 
 def marker(run):
     (run/'workstation_run.json').write_text(json.dumps({'application':'16S-workstation','format':2}),encoding='utf8')
@@ -464,8 +469,8 @@ def preprocess(job,c,quality_only=False):
         if not (run/'quality_complete.json').is_file() or (run/'preprocess_started.json').exists(): raise ValueError('质量目录未完成或已经开始过预处理；请创建新的质量检查任务')
         old=json.loads((run/'parameters.json').read_text(encoding='utf8'))
         keys=['input','metadata','mode','primer_mode','forward','reverse','env','conda','input_layout']
-        defaults={'input_layout':'unmerged'}
-        if any(c.get(k,defaults.get(k))!=old.get(k,defaults.get(k)) for k in keys): raise ValueError('数据、引物或环境改变，请重新执行质量检查')
+        defaults={'input_layout':'unmerged','forward':'','reverse':''}
+        if any((c.get(k) or defaults.get(k))!=(old.get(k) or defaults.get(k)) for k in keys): raise ValueError('数据、引物或环境改变，请重新执行质量检查')
         if old.get('data_state',data_state)!=data_state: raise ValueError('输入clean状态改变，请重新质量检查')
         if old.get('batch_id') and c.get('batch_id')!=old['batch_id']: raise ValueError('质量目录属于其他批次，请打开对应历史任务')
         input_inventory=json.loads((run/'input_inventory.json').read_text())
@@ -536,6 +541,7 @@ def preprocess(job,c,quality_only=False):
     if sequence_report: job['result']['sequence_structure']=sequence_report
     if saved.get('clean_fastq'): job['result']['clean_fastq']=saved['clean_fastq']
     stage_report(run,'08_parameter_advice','自动参数推荐',results=advice,notes=['推荐采用质量分布和抽样长度的保守启发式，不是 QIIME 2 官方固定阈值，也不是保证最优参数。','质量表无法计算每条 read 的预期错误数或推断真实扩增子长度。'])
+    seal_checkpoint(run,'quality')
     if quality_only:
         inventory(run)
         (run/'quality_complete.json').write_text('{}')
@@ -613,6 +619,16 @@ def preprocess(job,c,quality_only=False):
 def totals(run):
     return table_summary(artifact_path(run,'exported-table/feature-table.tsv'))['per_sample']
 
+def require_analysis_source(run,module):
+    """A verified external source is distinct from completed FASTQ preprocessing."""
+    if (run/'preprocess_complete.json').is_file(): return
+    marker=run/'external_inputs_complete.json'
+    if marker.is_file():
+        data=json.loads(marker.read_text(encoding='utf8'))
+        if module in data.get('supported_modules',[]): return
+        raise ValueError('此导入任务尚未准备 '+module+' 所需文件；请在该模块重新选择完整输入')
+    raise ValueError('请选择已完成预处理或该模块已校验的外部输入；失败任务请先检查恢复边界')
+
 def depth_advice_for_run(run):
     run=approved_run(run)
     config=json.loads((run/'parameters.json').read_text(encoding='utf8'))
@@ -642,10 +658,11 @@ def distance_skip_reason(filename):
 
 def diversity(job,c):
     run=path(c['run'])
-    if not (run/'preprocess_complete.json').is_file(): raise ValueError('请选择本工作站已完成预处理的 run 目录')
+    require_analysis_source(run,'diversity')
     saved=json.loads((run/'parameters.json').read_text(encoding='utf8'))
     if c.get('batch_id') and saved.get('batch_id') and c['batch_id']!=saved['batch_id']: raise ValueError('预处理结果属于其他批次，请先打开对应历史批次')
-    saved=dict(saved,**resolve_group_style(c,saved['samples'],fallback=saved),plot_settings=resolve_plot_settings(c,fallback=saved))
+    saved=dict(saved,**resolve_group_style(c,saved['samples'],fallback=saved),plot_settings=resolve_plot_settings(c,fallback=saved),
+               **{key:c[key] for key in ('conda','env','r_env','font') if c.get(key)})
     depth=integer(c,'depth',1,100000000); perms=integer(c,'permutations',99,99999)
     kept=retention(run,depth); rows=[(x['SampleID'],x['Group']) for x in kept if x['retained']]
     groups={g for _,g in rows}; orig={x['Group'] for x in kept}
@@ -755,7 +772,8 @@ def render_saved_diversity(job,c):
     parent=approved_run(previous['preprocess'])
     saved=previous['config']
     style=resolve_group_style(c,saved['samples'],fallback=saved)
-    config=dict(saved,**style,font=c.get('font') or saved['font'],plot_settings=resolve_plot_settings(c,fallback=saved))
+    config=dict(saved,**style,font=c.get('font') or saved['font'],plot_settings=resolve_plot_settings(c,fallback=saved),
+                **{key:c[key] for key in ('conda','env','r_env') if c.get(key)})
     output=analysis/'05_replots'; output.mkdir(exist_ok=True)
     run=output/('figures_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]); run.mkdir(); marker(run)
     job.update(run=str(run),log=str(run/'workflow.log'))
@@ -814,7 +832,8 @@ def render_saved_differential(job,c):
     parent=approved_run(previous['preprocess']); saved=previous['config']
     style=resolve_group_style(c,saved['samples'],fallback=source.get('group_style',saved))
     presentation=plot_options(c,fallback=source)
-    config=dict(saved,**style,font=c.get('font') or source.get('font') or saved.get('font','sans'),plot_settings=resolve_plot_settings(c,fallback=source))
+    config=dict(saved,**style,font=c.get('font') or source.get('font') or saved.get('font','sans'),plot_settings=resolve_plot_settings(c,fallback=source),
+                **{key:c[key] for key in ('conda','env','r_env') if c.get(key)})
     options=dict(source,**presentation,group_style=style,plot_settings=config['plot_settings'],font=config['font'],analysis_run=str(analysis),statistics_refit=False)
     if c.get('plot_target'): options['plot_target']=c['plot_target']
     output=analysis/'03_replots'; output.mkdir(exist_ok=True)
@@ -851,11 +870,11 @@ def extension(job,c,kind):
         output=analysis/'04_previews'
     else:
         parent=approved_run(c.get('run',''))
-        if not (parent/'preprocess_complete.json').is_file(): raise ValueError('扩展分析需要本工作站已完成预处理的 run 目录；不需要重新运行 DADA2')
+        require_analysis_source(parent,kind)
         saved=json.loads((parent/'parameters.json').read_text(encoding='utf8'))
         output=parent/'11_extensions'
     if kind!='lefse-render' and c.get('batch_id') and saved.get('batch_id') and c['batch_id']!=saved['batch_id']: raise ValueError('扩展分析输入属于其他批次，请先打开对应历史批次')
-    if c.get('conda'): saved=dict(saved,conda=c['conda'])
+    saved=dict(saved,**{key:c[key] for key in ('conda','env','r_env','font') if c.get(key)})
     parent_samples=json.loads((parent/'parameters.json').read_text(encoding='utf8'))['samples']
     observed=totals(parent)
     if set(observed)-{sample['SampleID'] for sample in parent_samples}: raise ValueError('过滤后表中存在未列入本批分组的样本')
@@ -905,7 +924,9 @@ def extension(job,c,kind):
     job['step']={'abundance':'ASV 与 L2–L7 丰度及相对丰度导出完成','advanced':'高级分析完成；查看各模块状态、结果和独立图片','differential':'门到属差异菌分析完成','lefse':'LEfSe 分析及图片完成','lefse-render':'按所选 LDA 阈值重绘完成，未重算检验','functional':'PICRUSt2 预测及自选 KO 注释汇总完成'}[kind]
 
 def worker(job,action,c):
+    job['_task']={'action':action,'config':dict(c),'instance_id':INSTANCE_ID,'started_at':time.time()}
     try:
+        if action=='recover': action,c=prepare_retry(job,c,module_api())
         prepare_execution(job,ROOT,action,c,RUNTIME)
         if action=='preflight': preflight(job,c)
         elif action=='inspect':
@@ -915,6 +936,10 @@ def worker(job,action,c):
         elif action=='quality': preprocess(job,c,quality_only=True)
         elif action=='recommend': refresh_quality_advice(job,c)
         elif action=='preprocess': preprocess(job,c)
+        elif action=='external-inputs':
+            from external_inputs import prepare_external
+            job['result']=prepare_external(job,c,module_api())
+            job['step']='独立模块输入已校验并另存；可直接运行所选分析，无需 FASTQ/DADA2'
         elif action=='resume-abundance':
             from abundance_tables import resume_abundance
             resume_abundance(job,c,module_api())
@@ -935,6 +960,9 @@ def worker(job,action,c):
         if job.get('run') and job.get('stage_folder'):
             stage_report(job['run'],job['stage_folder'],job['stage_title'],status=job['status'],parameters=job.get('stage_parameters'),results={'error':str(e)},notes=['此步骤没有成功完成；已生成的文件和此前成功步骤保留，不能据此宣称完整分析完成。'])
     finally:
+        try: ensure_task_run(job,c,module_api())
+        except Exception as error:
+            job['error']=str(job.get('error',''))+'；保存早期失败任务目录失败：'+str(error)
         if job.get('run'):
             try: finalize_execution(job)
             except Exception as error:
@@ -944,7 +972,11 @@ def worker(job,action,c):
                 Path(job['run'],'job_status.json').write_text(json.dumps({k:v for k,v in job.items() if k!='pid' and not k.startswith('_')},ensure_ascii=False,indent=2),encoding='utf8')
             except Exception as error:
                 job['status']='failed'; job['error']=str(job.get('error',''))+'；保存任务清单失败：'+str(error)
+            try: persist_task(job)
+            except Exception as error:
+                job['status']='failed'; job['error']=str(job.get('error',''))+'；保存任务恢复记录失败：'+str(error)
         job.pop('_execution',None)
+        job.pop('_task',None)
 
 def launch(action,c):
     with LOCK:
@@ -1013,6 +1045,12 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path=='/api/batch':
                 from batch_context import restore_batch
                 self.send(restore_batch(p['run'][0],module_api()))
+            elif u.path=='/api/recovery': self.send(recovery_plan(p['run'][0],module_api(),tuple(JOBS.values())))
+            elif u.path=='/api/tasks':
+                recent=list(JOBS.values())[::-1]
+                selected=[j for j in recent if j.get('status')=='running']+[j for j in recent if j.get('status')!='running'][:20]
+                fields=('id','action','recovery_action','status','step','run','error')
+                self.send({'jobs':[{k:j[k] for k in fields if k in j} for j in selected]})
             elif u.path=='/api/group-style': self.send(group_style_input(metadata=p.get('metadata',[None])[0],run=p.get('run',[None])[0]))
             elif u.path=='/api/plot-settings': self.send(plot_settings_input(p['run'][0]))
             elif u.path=='/api/figures':
@@ -1076,7 +1114,10 @@ class Handler(BaseHTTPRequestHandler):
                     except ProcessLookupError: pass
                 self.send({'ok':True}); return
             action=self.path.removeprefix('/api/')
-            if action not in ('preflight','inspect','quality','recommend','preprocess','resume-abundance','diversity','diversity-render','differential-render','advanced','advanced-render','figure-render','abundance','differential','lefse','lefse-render','functional'): raise ValueError('未知操作')
+            if action=='recover':
+                plan=recovery_plan(c.get('recovery_run',''),module_api(),tuple(JOBS.values()))
+                if not plan['recoverable']: raise ValueError(plan['boundary'])
+            if action not in ('external-inputs','preflight','inspect','quality','recommend','preprocess','resume-abundance','diversity','diversity-render','differential-render','advanced','advanced-render','figure-render','abundance','differential','lefse','lefse-render','functional','recover'): raise ValueError('未知操作')
             self.send({'id':launch(action,c)})
         except Exception as e: self.send({'error':str(e)},400)
 

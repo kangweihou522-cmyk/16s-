@@ -15,16 +15,20 @@ def list_batches(root, api):
     for child in sorted(root.iterdir(),key=lambda p:p.name,reverse=True):
         visited+=1
         if visited>2000: break
-        if not child.name.startswith('run_'): continue
+        if not child.name.startswith(('run_','external_','task_')): continue
         try:
             run=api.approved_run(child); p=_parameters(run); c=p.get('config',p)
             if not isinstance(c.get('samples'),list): continue
+            state_file=run/'task_state.json'
+            state=json.loads(state_file.read_text(encoding='utf8')) if state_file.is_file() else {}
             runs.append({'run':str(run),'batch_id':c.get('batch_id',str(run)),
                          'batch_name':c.get('batch_name') or run.name,
                          'created':datetime.fromtimestamp(run.stat().st_mtime,timezone(timedelta(hours=8))).isoformat(timespec='seconds'),
                          'sample_count':len(c['samples']),
                          'quality_complete':(run/'quality_complete.json').is_file(),
-                         'preprocess_complete':(run/'preprocess_complete.json').is_file()})
+                         'preprocess_complete':(run/'preprocess_complete.json').is_file(),
+                         'external_inputs_complete':(run/'external_inputs_complete.json').is_file(),
+                         'task_status':state.get('status','')})
         except (OSError,ValueError,TypeError): continue
         if len(runs)>=100: break
     return {'runs':runs,'limited':visited>2000 or len(runs)>=100}
@@ -39,7 +43,7 @@ def restore_batch(selected, api):
     fields={key:'' for key in ('quality_run','run','diversity_run','differential_run','lefse_run','abundance_run','advanced_run','result_run','figure_run')}
     fields['result_run']=str(run); fields['figure_run']=str(run)
     if (run/'quality_complete.json').is_file() and not (run/'preprocess_started.json').exists(): fields['quality_run']=str(run)
-    if (run/'preprocess_complete.json').is_file(): fields['run']=str(run)
+    if (run/'preprocess_complete.json').is_file() or (run/'external_inputs_complete.json').is_file(): fields['run']=str(run)
     for directory in (run/'07_diversity',run/'11_extensions'):
         if not directory.is_dir(): continue
         for child in sorted(directory.iterdir(),key=lambda p:p.name):
