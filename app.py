@@ -940,6 +940,14 @@ def worker(job,action,c):
             from external_inputs import prepare_external
             job['result']=prepare_external(job,c,module_api())
             job['step']='独立模块输入已校验并另存；可直接运行所选分析，无需 FASTQ/DADA2'
+        elif action=='ko-network':
+            from ko_network import run_ko_network
+            job['result']=run_ko_network(job,c,module_api())
+            job['step']='差异KO统计和代谢网络位置图完成'
+        elif action=='ko-network-render':
+            from ko_network import render_saved_ko_network
+            job['result']=render_saved_ko_network(job,c,module_api())
+            job['step']='已保存KO差异结果的位置图完成；未重算统计'
         elif action=='resume-abundance':
             from abundance_tables import resume_abundance
             resume_abundance(job,c,module_api())
@@ -1046,6 +1054,13 @@ class Handler(BaseHTTPRequestHandler):
                 from batch_context import restore_batch
                 self.send(restore_batch(p['run'][0],module_api()))
             elif u.path=='/api/recovery': self.send(recovery_plan(p['run'][0],module_api(),tuple(JOBS.values())))
+            elif u.path=='/api/ko-network':
+                from ko_network import _verify
+                run=approved_run(p['run'][0]);_verify(run)
+                options=json.loads((run/'ko_options.json').read_text())
+                self.send({'comparisons':json.loads((run/'02_statistics/comparisons.json').read_text()),
+                           'map_id':options.get('ko_map_id','ko01100'),'ko_kgml':options.get('ko_kgml',''),
+                           'effect_label':options['effect_label']})
             elif u.path=='/api/tasks':
                 recent=list(JOBS.values())[::-1]
                 selected=[j for j in recent if j.get('status')=='running']+[j for j in recent if j.get('status')!='running'][:20]
@@ -1117,7 +1132,7 @@ class Handler(BaseHTTPRequestHandler):
             if action=='recover':
                 plan=recovery_plan(c.get('recovery_run',''),module_api(),tuple(JOBS.values()))
                 if not plan['recoverable']: raise ValueError(plan['boundary'])
-            if action not in ('external-inputs','preflight','inspect','quality','recommend','preprocess','resume-abundance','diversity','diversity-render','differential-render','advanced','advanced-render','figure-render','abundance','differential','lefse','lefse-render','functional','recover'): raise ValueError('未知操作')
+            if action not in ('ko-network','ko-network-render','external-inputs','preflight','inspect','quality','recommend','preprocess','resume-abundance','diversity','diversity-render','differential-render','advanced','advanced-render','figure-render','abundance','differential','lefse','lefse-render','functional','recover'): raise ValueError('未知操作')
             self.send({'id':launch(action,c)})
         except Exception as e: self.send({'error':str(e)},400)
 

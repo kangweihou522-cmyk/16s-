@@ -60,3 +60,14 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(restored['config']['group_colors']['CON'],'#123456')
         self.assertEqual(restored['config']['plot_settings']['taxonomy']['palette'],'user_R')
         with self.assertRaises(ValueError):restore_batch(unrelated,app.module_api())
+
+    def test_functional_and_ko_results_restore_only_same_saved_source(self):
+        functional=self.child('11_extensions/functional_01','functional_complete.json')
+        folder=functional/'06_KO_network';folder.mkdir()
+        for name,parent in [('run_good',functional),('run_z_wrong',self.root/'other')]:
+            network=folder/name;network.mkdir();app.marker(network)
+            (network/'parameters.json').write_text(json.dumps({'functional_run':str(parent)}))
+            (network/'ko_statistics_complete.json').write_text('{}')
+        fields=restore_batch(self.run,app.module_api())['fields']
+        self.assertEqual(fields['functional_run'],str(functional))
+        self.assertEqual(fields['ko_network_run'],str(folder/'run_good'))

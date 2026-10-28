@@ -263,6 +263,28 @@ KO,L1,L2,L3,pathway_id,gene,KO_name,EC
 
 KEGG L1/L2/L3 或 pathway_id 下的 KO 求和只是注释聚合，不是 MinPath 等方法正式推断的 KEGG 通路丰度、通路完整性或活性。官方 MetaCyc 推断与这些求和需分别命名。当前未请求 stratified/per-sequence 输出，不能从功能总表声称已经得到各菌功能贡献。保存映射来源、版本、原文件 SHA256 和未映射 KO；不因注释名称熟悉就忽视预测不确定性。
 
+**差异预测 KO 在代谢网络中的位置图**：左侧“KO代谢位置图”支持三种独立输入。已有PICRUSt2任务会自动衔接其 `03_tables/KO_abundance.tsv`；也可提供外部KO×样本丰度表与 `SampleID,Group` CSV；若已有合适模型的差异结果，可直接导入，不重复计算。丰度允许小数，绝不为套用整数模型而四舍五入。
+
+丰度模式采用探索性的组成数据分析：先按出现率筛选KO，按保留KO总和做TSS，加比例尺度伪计数（默认1e-6），log2后中心化为CLR；对每个KO拟合Group及指定协变量的线性模型，导出全部两两对比。正效应为numerator相对denominator的log2 CLR差值，不是绝对基因拷贝数倍数。BH范围为本次所有可检验KO×比较；出现率、特征子组成与伪计数均影响结果。协变量可指定数值或分类；数字编码批次/性别若按类别调整，应填写在“其中按类别处理的协变量”。独立样本、完整协变量、足够自由度是前提；重复AnimalID/SubjectID、秩亏或不可估计项不会补造P值。复杂配对/纵向模型请在外部完成后导入。
+
+这里的P/q以预测表为条件，没有传播系统发育功能推断误差，也不能替代NSTI评估或实测功能验证。
+
+导入差异表的标准列为 `KO,comparison,numerator,denominator,effect,q`，可另有P；例如以下仅为格式示例，不是实际结果：
+
+```csv
+KO,comparison,numerator,denominator,effect,q
+K00844,TREAT_vs_CON,TREAT,CON,1.2,0.03
+K01689,TREAT_vs_CON,TREAT,CON,-0.8,0.02
+```
+
+必须选择原效应尺度（log2FC、log2 CLR差值或原模型estimate）；q需来自原分析的多重校正，不用未校正P冒充。导入模式保留原效应和校正范围，不重新BH。比较名与方向必须一致，同一比较重复KO会拒绝，不猜测哪一条正确。
+
+位置图需要真正的KO版KEGG KGML坐标，原有 `KO,L1,L2,L3...` 注释表没有坐标，不能替代。默认 `ko01100` 是全局代谢图，`ko00010` 等对应具体通路。可选择本地KGML；留空尝试从[KEGG公共接口](https://rest.kegg.jp/get/ko01100/kgml)下载，保存来源、时间和SHA256。若WSL网络不能下载，可在Windows浏览器另存KGML后选择该文件；已经完成的KO统计保留，只需从已保存结果重新绘图。图文件编号必须与KGML匹配，不能把任意截图当作可识别KO的地图。KEGG原图数据不随工作站源码分发。
+
+默认正向红、负向蓝、方向混合紫、未命中灰，可逐图修改。多KO共享的图元，只要部分KO通过展示阈值即可标示，但报告会列出完整成员、命中成员和partial标记；这不证明整套复合酶或整个反应活跃。无匹配/无显著KO会明确报告，未映射KO保留，不能随意放到别的位置。图上定位也不等于通路富集检验，更不等于表达、活性、代谢产物或代谢流变化。
+
+统计完成后默认展示首项比较，三组会保存三组对的完整结果；可切换比较再绘图。图片旁可改q/效应展示阈值、颜色、线宽、标签、尺寸和PNG/SVG/PDF导出，读取已保存统计和地图缓存；改变协变量/伪计数/输入数据则应重新计算本项KO分析，不需要重新跑PICRUSt2。`02_statistics`保存模型及变换，`01_map`保存坐标来源，`02_mapping`保存覆盖/共享图元报告。另导出 `ipath_selection.txt`，可由用户自行导入[iPath官方全局图](https://pathways.embl.de/)；工作站不会自动上传KO或样本数据。KGML解析参考[官方格式](https://www.kegg.jp/kegg/xml/docs/)与[Biopython KGML实现](https://github.com/biopython/biopython/tree/master/Bio/KEGG/KGML)。
+
 <a id="guide-14"></a>
 
 ## 14. 高级分析：核心菌群、排序与表型关联

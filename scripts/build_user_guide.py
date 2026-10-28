@@ -16,6 +16,7 @@ OUTPUTS = ('static/guide/index.html', 'docs/USER_GUIDE.docx')
 RUNTIME = ('app.py', 'index.html', 'batch_context.py', 'execution_record.py', 'sequence_structure.py', 'quality_advice.py', 'qc_report.py',
            'depth_advice.py', 'abundance_tables.py', 'recovery.py', 'external_inputs.py', 'differential_analysis.py',
            'differential_ancombc.R', 'lefse_analysis.py', 'functional_prediction.py',
+           'ko_network.py', 'ko_map_geometry.py', 'ko_differential.R', 'ko_map_render.R',
            'advanced_analysis.py', 'advanced_analysis.R', 'render.R',
            'plots/qiime2_io.R', 'plot_settings.py', 'figure_editor.py')
 CSS = '''<style>

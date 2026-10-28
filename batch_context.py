@@ -40,7 +40,7 @@ def restore_batch(selected, api):
         run=api.approved_run(p['preprocess']); p=_parameters(run)
     config=dict(p.get('config',p))
     if not config.get('samples'): raise ValueError('请选择质量检查或预处理批次目录，而非单个图片/检查目录')
-    fields={key:'' for key in ('quality_run','run','diversity_run','differential_run','lefse_run','abundance_run','advanced_run','result_run','figure_run')}
+    fields={key:'' for key in ('quality_run','run','diversity_run','differential_run','lefse_run','abundance_run','advanced_run','functional_run','ko_network_run','result_run','figure_run')}
     fields['result_run']=str(run); fields['figure_run']=str(run)
     if (run/'quality_complete.json').is_file() and not (run/'preprocess_started.json').exists(): fields['quality_run']=str(run)
     if (run/'preprocess_complete.json').is_file() or (run/'external_inputs_complete.json').is_file(): fields['run']=str(run)
@@ -57,6 +57,14 @@ def restore_batch(selected, api):
                 elif (child/'differential_options.json').is_file() and (child/'differential_complete.json').is_file(): fields['differential_run']=str(child)
                 elif (child/'10_abundance/manifest.json').is_file() and (child/'abundance_complete.json').is_file(): fields['abundance_run']=str(child)
                 elif (child/'advanced_complete.json').is_file(): fields['advanced_run']=str(child)
+                elif (child/'functional_complete.json').is_file():
+                    fields['functional_run']=str(child)
+                    network_folder=child/'06_KO_network'
+                    if network_folder.is_dir():
+                        for network in sorted(network_folder.iterdir(),key=lambda p:p.name):
+                            if ((network/'ko_statistics_complete.json').is_file()
+                                    and Path(_parameters(network).get('functional_run','')).resolve()==child):
+                                fields['ko_network_run']=str(api.approved_run(network))
             except (OSError,ValueError,TypeError): continue
     config.setdefault('data_state','clean' if config.get('primer_mode')=='removed' else 'raw')
     config.setdefault('input_layout','unmerged')

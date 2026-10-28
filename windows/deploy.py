@@ -37,6 +37,7 @@ REQUIRED = ['app.py', 'index.html', 'launch.py', 'run_layout.py', 'batch_context
             'advanced_analysis.py', 'advanced_analysis.R', 'qc_report.py', 'recovery.py', 'external_inputs.py',
             'abundance_tables.py', 'depth_advice.py', 'differential_analysis.py',
             'execution_record.py', 'figure_editor.py', 'functional_prediction.py',
+            'ko_network.py', 'ko_map_geometry.py', 'ko_differential.R', 'ko_map_render.R',
             'group_style.py', 'lefse_analysis.py', 'plot_settings.py', 'quality_advice.py',
             'sequence_structure.py', 'render.R', 'taxonomy_plot.R', 'differential_ancombc.R',
             'taxonomy_palettes.json', 'plots/qiime2_io.R', 'plots/plot_alpha_original_style.R',

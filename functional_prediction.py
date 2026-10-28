@@ -392,5 +392,5 @@ def run_functional(job, config, saved, parent, api):
     qc = collect_qc(raw, original, run / '05_qc', effective['max_nsti'])
     write_table(run / '05_qc/unmatched_KO.tsv', {'samples': samples, 'values': {ko: tables['KO']['values'][ko] for ko in unmatched}})
     api.finish_stage(job, qc, ['排除 reads 用输入未抽平计数和官方 seqtab_norm 中的保留 ASV 集合计算。未提供的官方文件明确报告 unavailable，不虚构排除率或 NSTI。', '缺少具体排除原因的 ASV 仅标记未进入官方保留表，不推测为比对失败。官方加权 NSTI 是 PICRUSt2 输出；不自行替代其定义。'])
-    job['result'] = {'extension': 'functional', 'preprocess': str(parent), 'effective_parameters': effective, 'tables': {**written, **category_paths}, 'qc': qc, 'unmatched_KO_count': len(unmatched), 'prediction_method': 'PICRUSt2 inferred KO/EC; MetaCyc inferred from EC/MinPath; KEGG categories are summed mapped KO memberships', 'official_sources': OFFICIAL_SOURCES}
+    job['result'] = {'functional_run':str(run), 'extension': 'functional', 'preprocess': str(parent), 'effective_parameters': effective, 'tables': {**written, **category_paths}, 'qc': qc, 'unmatched_KO_count': len(unmatched), 'prediction_method': 'PICRUSt2 inferred KO/EC; MetaCyc inferred from EC/MinPath; KEGG categories are summed mapped KO memberships', 'official_sources': OFFICIAL_SOURCES}
     return job['result']

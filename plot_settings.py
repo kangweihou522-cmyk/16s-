@@ -25,6 +25,9 @@ DEFAULTS = {
                   'label_levels': 2, 'top_n': 0, 'orientation': 'horizontal'},
     'lefse_cladogram': {**COMMON, 'label_font_size': None, 'max_level': None,
                         'min_point_size': None, 'max_point_size': None},
+    'metabolic_map': {**COMMON, 'up_color': '#D73027', 'down_color': '#4575B4',
+                      'mixed_color': '#984EA3', 'background_color': '#C8CDD0',
+                      'line_width': 1, 'show_labels': True, 'q_threshold': .05, 'effect_threshold': 0},
 }
 RANGES = {
     'dpi': (72, 600, True), 'base_size': (6, 30, False), 'title_size': (6, 40, False),
@@ -38,6 +41,7 @@ RANGES = {
     'class_font_size': (5, 24, False), 'label_levels': (1, 7, True),
     'label_font_size': (5, 24, False), 'max_level': (1, 7, True),
     'min_point_size': (.1, 20, False), 'max_point_size': (.1, 30, False),
+    'line_width': (.1, 6, False), 'q_threshold': (0, 1, False), 'effect_threshold': (0, 100, False),
 }
 ENUMS = {
     'font_family': ('original', 'DejaVu Serif', 'DejaVu Sans', 'Times New Roman'),
@@ -86,6 +90,10 @@ def resolve_plot_settings(config, fallback=None):
             elif key == 'levels':
                 if not isinstance(value, list) or not value or any(isinstance(v, bool) or not isinstance(v, int) or v not in range(2, 8) for v in value) or len(set(value)) != len(value):
                     raise ValueError('分类柱图层级请选择 L2–L7，不能重复或全不选')
+            elif key.endswith('_color'):
+                import re
+                if not isinstance(value,str) or not re.fullmatch(r'#[0-9A-Fa-f]{6}',value):
+                    raise ValueError(label+' 必须为 #RRGGBB 颜色')
             elif not isinstance(value, str) or len(value) > 300 or '\x00' in value:
                 raise ValueError(label + ' 必须是最多300字的标签文本')
     points = result['lefse_cladogram']
@@ -106,7 +114,7 @@ def ui_schema():
     titles = {'general': '通用导出与文字', 'alpha': 'α 多样性图', 'beta': 'β 多样性 / PCoA',
               'taxonomy': '分类丰度柱图', 'heatmap': '差异菌丰度热图', 'bubble': '差异菌丰度气泡图',
               'effect': '差异效应 / ANCOM W 图', 'lefse_bar': 'LEfSe LDA 柱图',
-              'lefse_cladogram': 'LEfSe 分类分支图'}
+              'lefse_cladogram': 'LEfSe 分类分支图', 'metabolic_map': 'KO 代谢网络位置图'}
     labels = {'dpi': 'PNG 分辨率 DPI（留空原版）', 'font_family': '字体（原版沿用各图字体）',
               'base_size': '基础字号（留空原版）', 'title_size': '标题字号', 'axis_text_size': '坐标刻度字号',
               'legend_text_size': '图例字号', 'legend_position': '图例位置', 'theme': '绘图主题',
@@ -125,7 +133,10 @@ def ui_schema():
               'feature_font_size': '菌名标签字号', 'class_font_size': '分组图例字号',
               'label_levels': '标签显示的谱系层数', 'orientation': '柱图方向',
               'label_font_size': '分支标签字号', 'max_level': '最深显示层级（留空全部）',
-              'min_point_size': '最小节点大小', 'max_point_size': '最大节点大小'}
+              'min_point_size': '最小节点大小', 'max_point_size': '最大节点大小',
+              'up_color':'正向差异颜色','down_color':'负向差异颜色','mixed_color':'方向混合颜色',
+              'background_color':'未命中背景颜色','line_width':'网络线宽','show_labels':'显示原图标签',
+              'q_threshold':'展示 q 值上限（不重算统计）','effect_threshold':'展示绝对效应下限'}
     choices = {'original': '沿用原版', 'right': '右侧', 'bottom': '下方', 'none': '隐藏',
                'classic': '简洁坐标轴', 'minimal': '简约', 'bw': '黑白网格', 'white': '白色',
                'transparent': '透明', 'png_svg': 'PNG + SVG', 'png_svg_pdf': 'PNG + SVG + PDF',
@@ -150,6 +161,7 @@ def ui_schema():
                 field.update(type='number',min=lo,max=hi,step=1 if whole else 'any',nullable=default is None)
             elif key=='levels':
                 field.update(type='levels',options=[{'value':v,'label':'L'+str(v)+' '+name} for v,name in zip(range(2,8),('门','纲','目','科','属','种'))])
+            elif key.endswith('_color'): field.update(type='color')
             else: field.update(type='text',maxlength=300)
             fields.append(field)
         rows.append({'key':profile,'title':titles[profile],'fields':fields})

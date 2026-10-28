@@ -53,6 +53,8 @@ def prepare_execution(job, root, action, config, runtime):
         ('differential_analysis.py', '门到属的 ANCOM-BC2 / QIIME ANCOM 差异分析编排。'),
         ('lefse_analysis.py', 'LEfSe 分类谱系预处理、检验和基于缓存的 LDA 阈值重绘。'),
         ('functional_prediction.py', 'PICRUSt2、NSTI 与用户 KO 数据库注释和层级汇总。'),
+        ('ko_network.py', '连续预测KO的差异结果保存、真实代谢图映射、覆盖报告和缓存重绘。'),
+        ('ko_map_geometry.py', '安全读取官方KGML原始坐标和KO图元成员，不推断缺失连接。'),
         ('advanced_analysis.py', '核心菌群、排序与表型关联的样本对齐、参数校验及缓存重绘编排。'),
         ('execution_record.py', '记录实际执行命令、参数及源码文本。'),
     ]:

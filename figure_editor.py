@@ -17,7 +17,7 @@ BETA = {'bray_curtis', 'jaccard', 'unweighted_unifrac', 'weighted_unifrac', 'fou
 RANKS = ('kingdom', 'phylum', 'class', 'order', 'family', 'genus', 'species')
 LABELS = {'alpha': 'α 多样性', 'beta': 'PCoA', 'taxonomy': '分类丰度',
           'heatmap': '差异菌丰度热图', 'bubble': '差异菌丰度气泡图', 'effect': '差异效应',
-          'lefse_bar': 'LEfSe LDA 柱图', 'lefse_cladogram': 'LEfSe 分类分支图'}
+          'lefse_bar': 'LEfSe LDA 柱图', 'lefse_cladogram': 'LEfSe 分类分支图','metabolic_map':'KO代谢网络位置图'}
 
 
 def _json(filename, default=None):
@@ -66,6 +66,11 @@ def describe_figure(image, api):
                 analysis = record.get('analysis_run') or value.get('input_run') or previous.get('diversity_run') or owner
                 settings = value.get('plot_settings') or settings
                 break
+        elif value.get('source') == 'ko_network':
+            kind,profile,stem,summary='ko_network','metabolic_map','03_figures/metabolic_map',value
+            analysis=record.get('analysis_run') or value.get('analysis_run') or owner
+            settings=value.get('plot_settings') or settings
+            break
         elif value.get('source') == 'advanced_analysis':
             relative = image.relative_to(owner).with_suffix('').as_posix()
             entries = value.get('figures', [])
@@ -126,6 +131,8 @@ def describe_figure(image, api):
         result['visual_options'] = {key: visual[key] for key in
             ('diff_plot_top_n', 'heatmap_low', 'heatmap_mid', 'heatmap_high', 'bubble_low', 'bubble_high')}
         result['title'] = '高级生态分析 · ' + image.stem
+    if kind == 'ko_network':
+        result['visual_options']={key:summary.get(key) for key in ('comparison','map_id','ko_kgml')}
     if kind == 'lefse':
         result['lda_threshold'] = summary.get('lda_threshold', 2)
     return result
@@ -177,6 +184,12 @@ def render_figure(job, request, api):
         config.update(plot_options(visual, fallback=figure['visual_options']))
         api.render_saved_differential(job, dict(config, differential_run=str(analysis)))
         output = Path(job['run']) / (figure['stem'] + '.png')
+    elif figure['kind'] == 'ko_network':
+        from ko_network import render_saved_ko_network
+        render_saved_ko_network(job,dict(config,ko_network_run=str(analysis),ko_map_source_run=figure['render_run'],
+                                        ko_comparison=figure['visual_options']['comparison'],ko_map_id=figure['visual_options']['map_id'],
+                                        ko_kgml=figure['visual_options']['ko_kgml']),api)
+        output=Path(job['run'])/'03_figures/metabolic_map.png'
     elif figure['kind'] == 'advanced':
         from advanced_analysis import render_saved_advanced
         visual = {key: request[key] for key in figure['visual_options'] if key in request}

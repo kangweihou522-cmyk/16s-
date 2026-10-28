@@ -200,7 +200,7 @@ def recovery_plan(selected, api, active_jobs=()):
     state = _read(run / 'task_state.json') or _read(run / 'job_status.json')
     action = state.get('action') or saved.get('extension') or ('preprocess' if (run / 'preprocess_started.json').exists() else 'quality')
     effective = saved.get('config', saved)
-    config = dict(effective, **state.get('config', {}), **saved.get('extension_parameters', {}))
+    config = {**effective, **state.get('config', {}), **saved.get('extension_parameters', {})}
     if action in ('preprocess', 'quality', 'resume-abundance'):
         config.update(effective)
     for key in ('depth', 'permutations'):
@@ -220,7 +220,15 @@ def recovery_plan(selected, api, active_jobs=()):
     if action in ('inspect', 'preflight', 'recommend') or (run / '00_checks').exists():
         plan['boundary'] = '检查或参数推荐没有可续跑的分析阶段；请修正设置后重新执行相应检查'
         return plan
-    if action == 'external-inputs':
+    if action in ('ko-network','ko-network-render'):
+        analysis=run if (run/'ko_statistics_complete.json').is_file() else api.approved_run(saved.get('ko_network_run') or config.get('ko_network_run','')) if action=='ko-network-render' else run
+        if (analysis/'ko_statistics_complete.json').is_file():
+            config['ko_network_run']=str(analysis)
+            fields['ko_network_run']=str(analysis)
+            plan.update(strategy='ko-map',boundary='复用已保存的KO差异统计，选择可用KGML后仅重绘；不会重新运行PICRUSt2或KO检验')
+        else:
+            plan.update(strategy='restart-ko',boundary='KO差异统计尚未完整，独立重跑本项KO分析；不会重新执行FASTQ/PICRUSt2')
+    elif action == 'external-inputs':
         plan.update(strategy='restart-external', boundary='按原请求的外部产物及分组文件，在独立新目录重新准备分析输入；来源文件保持只读')
     elif action in ('quality', 'preprocess', 'resume-abundance'):
         if (run / 'preprocess_complete.json').exists():
@@ -340,7 +348,11 @@ def prepare_retry(job, request, api):
         config.update(quality_run=str(destination) if strategy == 'quality' else '',
                       result_run=str(destination), run='')
     else:
-        action = 'diversity-render' if strategy == 'diversity-render' else plan['action']
+        action = 'ko-network-render' if strategy=='ko-map' else 'diversity-render' if strategy == 'diversity-render' else plan['action']
+        if strategy=='ko-map':
+            config['ko_network_run']=plan['config']['ko_network_run']
+            if any(str(config.get(key,''))!=str(plan['config'].get(key,'')) for key in ('ko_categorical_covariates','ko_covariates','ko_prevalence','ko_pseudocount','ko_metadata','ko_table','ko_differential_file','ko_source')):
+                action='ko-network'
         if strategy == 'diversity-render':
             if any(str(config.get(key, '')) != str(plan['config'].get(key, '')) for key in ('depth', 'permutations')):
                 action, strategy = 'diversity', 'analysis'

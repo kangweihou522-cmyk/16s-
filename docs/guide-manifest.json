@@ -1,32 +1,36 @@
 {
   "schema": 1,
   "source": "docs/USER_GUIDE.md",
-  "source_sha256": "df87b65ea9928d08138efdc8c447da053df62e77dc392998173e85e0dfe80352",
+  "source_sha256": "353ea5cb097087c5608a3b52394bd1f96932c92c92814b809a0bfbecdf2b9a8f",
   "runtime": {
-    "app.py": "dd8fc0fa6d17eb191e49249d1141e746fa61f65369e37adcf0472aa89ade5b02",
-    "index.html": "4e415d0fd275c9f4e14b93dcd97376dbab596312a9d4296063c5a45f4b456db6",
-    "batch_context.py": "90b6ef9463b4a3c9cca3b72d68cfb8f90662e7e57bfcdf9b6d15f4ab62f4c648",
-    "execution_record.py": "2c890503abdb7d67ed57d1f04f0dff821240c09d680def7e15797422cb0d5849",
+    "app.py": "1ae4711a997465ca1dd571f4f070c0faed95a409b695048f7bf1d74232f22df7",
+    "index.html": "1f7b5eae2042fb766177f7deebc31245ef6671ff50b43cc64aa54c94cf3fc618",
+    "batch_context.py": "05a591706b72db766a50720eab8094e1de957e1b8df75c1aed49d3f775c85660",
+    "execution_record.py": "24e3dcb9d9959ff769695866589d62e5917b73c049213919c3bab68ab19a32f9",
     "sequence_structure.py": "b7d32db8983e3add71bdab7fb3d1072c26c4b37724e5b2da2fa267397f5798a2",
     "quality_advice.py": "6808270b8b90b2c5e11c221c27e164eb51cdfa48f54c16b324a950e8210c5457",
     "qc_report.py": "16040303b94e6fa93479be034492c741d00a86007cf4d588d733233e52c66706",
     "depth_advice.py": "402ca0bd49572458f72e7d4eea7a6c5d45e4f4ecc228e9114651d6bd91b8bd5a",
     "abundance_tables.py": "ab1ddfbbec6601deafd8b4b2b3f49225194965358c58aa1218effd548e60e6ef",
-    "recovery.py": "6d440f1d793f6540d6b541b16ba15f70f712993977ba52ff36b1012128698a4c",
+    "recovery.py": "be50fe9728c17a42308e9dc72b493b99b3fe64b35f0e232bbc3e1984ae0e0bf3",
     "external_inputs.py": "c1e938a20962c6acf338aae50e7504b6af6432969d7c76e6ea1e3f9ffadef945",
     "differential_analysis.py": "dbccf8a9af6f602ad4a1c829e62de541a566d60432bb77bb8ad3807e9e3458ae",
     "differential_ancombc.R": "bc72886f776462207ce3599c428d14d0c099d5d6577246b28f1e366876282d9e",
     "lefse_analysis.py": "f4be3557a3109a4ba67e9ba8646aae4c7148d7f2d60d41a8ad8d51d930256286",
-    "functional_prediction.py": "8af31c4d61ad07dbd037f78900c9e44cdd042890cda9ed41150b2ef01fc8a9ac",
+    "functional_prediction.py": "6128eb7ab630888c0f642a5214745df07691e251d696b960c726493dd824bd48",
+    "ko_network.py": "6d101d7c330f7e6a82075d1fd4df3e7020cffe71e932ee6c52736fea8d4bec79",
+    "ko_map_geometry.py": "10aea197123db60990432ed52c754603bd23738f8c202df79c4aa31dbe1e8c03",
+    "ko_differential.R": "73915b048156b13dc72f531ae23441aab4028561e97df709dfc8c563901c395c",
+    "ko_map_render.R": "b8696312db35c513b76b1f171e71c2a470ffa3db575ec073bb0cb9614f73ae1d",
     "advanced_analysis.py": "1d707a30791af2416c4636d5f42a76416cbbb9a49d2904e24df7ddf4857127ea",
     "advanced_analysis.R": "f3f95390ab2ec716e2ed48dde0dde88ac3825f1ccfa03de4acd414b6a4a71b84",
     "render.R": "8a68f85920ee4ed08b9b01289df07606a6fa48202af953a50fa313c15f2404af",
     "plots/qiime2_io.R": "0fbc5852ee8504ba188c6c40181ebaac11f6a6c7430d7dce8664373067774bce",
-    "plot_settings.py": "9dee103fa58ba67ee7f5c93bc3fe4f0da06bad854d15938b7f4c052f0fa9c799",
-    "figure_editor.py": "8588ae0b176ab79d2b3b8f9cca66ed8dc62805b01e2e857d3e9cc601183d02b5"
+    "plot_settings.py": "9736660b4bca26879cc7e5af207d44b09f9e5b9a3008c2d19ab4462125883744",
+    "figure_editor.py": "06d51494070ad5cafd567db53c0ef3279c37abe25ecc8e77522c08dbfa2e3eb8"
   },
   "outputs": {
-    "static/guide/index.html": "9bc3de3e63500b1d2c8a9b14d88e9cd4608e6613407598b1ea30a9d34253e145",
-    "docs/USER_GUIDE.docx": "5c5cf7a1c606ca870d3f0fd662d9a64ec775a16d688ef774c9070b08a2a3f7e7"
+    "static/guide/index.html": "389eb4ed34049cf21b2c462ed87f907514857f10bcced67f28ca4b3751281b83",
+    "docs/USER_GUIDE.docx": "48e203c0af82eb9e895bc095b464c59922d10ef2677112431c37c3b28ad651fd"
   }
 }
